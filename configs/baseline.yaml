@@ -1,0 +1,41 @@
+# configs/baseline.yaml
+#
+# Hiperparametros e identidad del baseline de deteccion (TRN-001, issue #6).
+# Unica fuente de hiperparametros: src/train.py no debe tener valores por
+# defecto embebidos que cambien el resultado -- todo lo que afecta al
+# entrenamiento vive aca, declarado explicitamente (brief de Pablo, punto 2).
+#
+# Fase actual: interfaz + fixture propio (G2). El entrenamiento real sobre el
+# dataset congelado (G4) puede reusar este mismo archivo o versionarlo aparte
+# si el equipo decide otros hiperparametros una vez visto el dataset real --
+# eso se documenta en su momento, no se asume aca.
+
+# Modelo base: pesos preentrenados en COCO (transfer learning), segun la
+# mision del brief ("implementar un detector preentrenado").
+modelo: yolo11n.pt
+
+# Entrenamiento
+epochs: 40
+imgsz: 416
+batch: 8
+device: cpu          # determinismo entre integrantes -- ver docs/ENVIRONMENT.md
+optimizer: auto      # el que trae ultralytics por defecto para YOLO11n
+lr0: 0.01
+seed: 42             # default; --seed en CLI puede sobrescribirlo, pero nunca queda implicito
+
+# Smoke train (validacion de interfaz sobre el fixture, no sobre datos reales)
+smoke:
+  epochs: 1
+  imgsz: 64
+  batch: 2
+
+# Aumentacion: apagada para que el entrenamiento sea reproducible byte a byte
+# entre corridas del mismo seed durante esta fase de interfaz. Se reabre
+# explicitamente, con su propio registro, si el equipo la habilita para G4.
+augment: false
+mosaic: 0.0
+hsv_h: 0.0
+hsv_s: 0.0
+hsv_v: 0.0
+fliplr: 0.0
+flipud: 0.0
