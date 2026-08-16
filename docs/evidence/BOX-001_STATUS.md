@@ -1,14 +1,17 @@
 # Estado BOX-001 — Andrés Poiche
-Última actualización: 2026-08-16, commit 9c00d5e en rama feat/boxes-andres
+Última actualización: 2026-08-16, commit e9c99fd en rama feat/boxes-andres
 
 ## Hecho
 - Entorno: .venv con pytest 9.1.1, numpy 2.5.2, pillow 12.3.0, pandas (requirements-boxes.txt)
-- src/data/make_boxes.py implementado:
+- src/data/make_boxes.py implementado, T01-T10 COMPLETO (§8 contrato):
   - compute_yolo_box: extremos + bordes semiabiertos + formato YOLO (§5-6 contrato)
   - make_mask_from_alpha: máscara desde canal alpha RGBA (§4 contrato)
   - make_mask_from_rgb: máscara desde fondo uniforme RGB (§4 contrato)
   - load_and_validate_image: carga/valida imagen decodificable (§3 contrato)
-- tests/test_make_boxes.py: 10/11 tests pasan (T01-T09 + T09b control)
+  - check_no_orphans (T10): gate de huérfanos label/imagen, ValueError si
+    hay al menos uno; testeado con carpetas sintéticas (tmp_path), no
+    depende del scraper real de Monserrat
+- tests/test_make_boxes.py: 13/13 tests pasan (T01-T10 completo, sin skips)
 - src/data/make_splits.py implementado, cobertura completa de §split_policy:
   - group_exclusivity (sku_id, source_asset_id, duplicate_group_id): union-find
   - derivative_rule: grupos completos, nunca se parten entre splits
@@ -19,14 +22,13 @@
 - Acuse formal posteado en issue #3 (ACK-001)
 - Mensaje enviado al equipo con 2 preguntas (rama, reviewer) + 2 bloqueantes
   de contrato — pendiente respuesta
-- Confirmado acceso al repo (push exitoso + username clickeable en issues);
-  la nota "no puede revisar hasta aceptar invitación" en issue #4 está desactualizada
+- Confirmado acceso al repo (push exitoso + username clickeable en issues)
 
 ## Pendiente
-- T10 (huérfanos label/imagen): requiere pipeline completo de auditoría a nivel
-  dataset, no es una función unitaria — se implementa junto con el CLI principal
-- Falta el CLI/orquestador que use estas funciones sobre el manifest real de
-  Monserrat (handoff SCR-001 aún no entregado)
+- CLI/orquestador que use check_no_orphans + demás funciones sobre el
+  manifest real de Monserrat (handoff SCR-001 aún no entregado) — la
+  auditoría del dataset REAL completo sigue bloqueada, aunque la función
+  unitaria T10 ya está lista y testeada
 - Falta configs/dataset.yaml (contrato no define schema interno — sección
   outputs solo lo lista como entregable; se arma con parámetros conocidos +
   PENDING_* explícitos)
@@ -61,8 +63,10 @@
 ## Discrepancias a confirmar con Guillermo
 - Nombre de rama: se usó "feat/boxes-andres" (indicado por Guillermo en chat),
   pero el manual operativo §3 especifica "feat/andres/box-001-..."
-- Reviewer: issue #5 y manual §5 dicen Monserrat; un mensaje de chat de
-  Guillermo dijo Pablo — se toma Monserrat como correcto (coincide en 2 fuentes)
+- Reviewer: el chat directo de Guillermo a Andrés dice explícitamente
+  "tu revisor es Pablo" — pero issue #5 y manual §5 dicen Monserrat.
+  Ya no es un mensaje ambiguo: es instrucción directa en conflicto con
+  la documentación formal. A confirmar en la reunión de las 5.
 - SCR-001: Monserrat dijo por chat "estoy en S4", issue reporta gate G2 y
   ejecución S01-S10 completa — confirmar estado real
 
