@@ -193,7 +193,7 @@ class TestScraperExtraction(unittest.TestCase):
 
         declared_too_large = FakeResponse(
             body=b"x" * 10,
-            content_length=1_048_577,
+            content_length=5_242_881,
         )
 
         with patch(
@@ -202,11 +202,11 @@ class TestScraperExtraction(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "IMAGE_TOO_LARGE",
+                "REJECTED_MAX_BYTES",
             ):
                 client.get(
                     "https://amarket.com.bo/test.jpg",
-                    max_bytes=1_048_576,
+                    max_bytes=5_242_880,
                 )
 
         self.assertFalse(
@@ -217,7 +217,7 @@ class TestScraperExtraction(unittest.TestCase):
         )
 
         body_too_large = FakeResponse(
-            body=b"x" * 1_048_577,
+            body=b"x" * 5_242_881,
             content_length=None,
         )
 
@@ -227,11 +227,11 @@ class TestScraperExtraction(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "IMAGE_TOO_LARGE",
+                "REJECTED_MAX_BYTES",
             ):
                 client.get(
                     "https://amarket.com.bo/test.jpg",
-                    max_bytes=1_048_576,
+                    max_bytes=5_242_880,
                 )
 
         self.assertTrue(
@@ -252,7 +252,7 @@ class TestScraperExtraction(unittest.TestCase):
         ):
             result = client.get(
                 "https://amarket.com.bo/test.jpg",
-                max_bytes=1_048_576,
+                max_bytes=5_242_880,
             )
 
         self.assertEqual(

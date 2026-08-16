@@ -250,7 +250,7 @@ class PoliteHttpClient:
                         and declared_size > max_bytes
                     ):
                         raise RuntimeError(
-                            "IMAGE_TOO_LARGE"
+                            "REJECTED_MAX_BYTES"
                         )
 
                 body = response.read(
@@ -259,7 +259,7 @@ class PoliteHttpClient:
 
                 if len(body) > max_bytes:
                     raise RuntimeError(
-                        "IMAGE_TOO_LARGE"
+                        "REJECTED_MAX_BYTES"
                     )
 
         finally:
@@ -1711,6 +1711,11 @@ def main():
     print(
         "Smoke test:",
         args.smoke_test,
+    )
+
+    print(
+        "Max image bytes:",
+        config["limits"]["max_image_bytes"],
     )
 
     if not args.smoke_test:
