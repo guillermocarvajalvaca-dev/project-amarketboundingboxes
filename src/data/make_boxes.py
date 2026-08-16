@@ -197,3 +197,40 @@ def load_and_validate_image(path: str) -> np.ndarray:
         raise ValueError(f"Imagen no decodificable en '{path}': W={W}, H={H} debe ser >0")
 
     return arr
+
+
+def check_no_orphans(images_dir: str, labels_dir: str) -> None:
+    """T10 (§8 contrato): verifica que no haya imágenes ni labels huérfanos.
+
+    Un huérfano es:
+    - una imagen sin su .txt correspondiente (mismo nombre base), o
+    - un label .txt sin su imagen correspondiente.
+
+    El gate falla (ValueError) si se encuentra al menos un huérfano.
+    No modifica ni borra nada; solo detecta y reporta.
+    """
+    import os
+
+    image_exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+    image_stems = {
+        os.path.splitext(f)[0]
+        for f in os.listdir(images_dir)
+        if os.path.splitext(f)[1].lower() in image_exts
+    }
+    label_stems = {
+        os.path.splitext(f)[0]
+        for f in os.listdir(labels_dir)
+        if f.lower().endswith(".txt")
+    }
+
+    orphan_images = sorted(image_stems - label_stems)
+    orphan_labels = sorted(label_stems - image_stems)
+
+    if orphan_images or orphan_labels:
+        details = []
+        if orphan_images:
+            details.append(f"imágenes huérfanas (sin label): {orphan_images}")
+        if orphan_labels:
+            details.append(f"labels huérfanos (sin imagen): {orphan_labels}")
+        raise ValueError("Gate T10 falla — " + "; ".join(details))

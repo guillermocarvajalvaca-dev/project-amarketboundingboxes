@@ -9,7 +9,7 @@ y devolver la línea YOLO formateada: "0 x_center y_center width height"
 import numpy as np
 import pytest
 
-from src.data.make_boxes import compute_yolo_box  # aún no existe -> test falla (rojo)
+from src.data.make_boxes import compute_yolo_box, check_no_orphans
 
 
 def make_mask(h, w, x_range, y_range):
@@ -127,7 +127,47 @@ def test_T09b_imagen_valida_decodifica(tmp_path):
     assert result.shape[:2] == (8, 10)  # (H, W, ...)
 
 
-def test_T10_label_imagen_huerfano():
-    """label/imagen huérfano -> gate falla (placeholder: requiere lógica a nivel de pipeline/dataset,
-    no de la función unitaria compute_yolo_box; se testea en integración, no acá)"""
-    pytest.skip("Pendiente: se valida a nivel de auditoría del dataset completo, no unitariamente")
+def test_T10_orphan_imagen_sin_label(tmp_path):
+    """T10: imagen sin su label correspondiente -> gate falla (ValueError)."""
+    images_dir = tmp_path / "images"
+    labels_dir = tmp_path / "labels"
+    images_dir.mkdir()
+    labels_dir.mkdir()
+
+    (images_dir / "A001.jpg").write_bytes(b"fake")
+    (images_dir / "A002.jpg").write_bytes(b"fake")
+    (labels_dir / "A001.txt").write_text("0 0.5 0.5 0.5 0.5\n")
+    # A002.txt falta -> A002.jpg es huérfano
+
+    with pytest.raises(ValueError, match="huérfan"):
+        check_no_orphans(str(images_dir), str(labels_dir))
+
+
+def test_T10_orphan_label_sin_imagen(tmp_path):
+    """T10: label sin su imagen correspondiente -> gate falla (ValueError)."""
+    images_dir = tmp_path / "images"
+    labels_dir = tmp_path / "labels"
+    images_dir.mkdir()
+    labels_dir.mkdir()
+
+    (images_dir / "A001.jpg").write_bytes(b"fake")
+    (labels_dir / "A001.txt").write_text("0 0.5 0.5 0.5 0.5\n")
+    (labels_dir / "A002.txt").write_text("0 0.5 0.5 0.5 0.5\n")
+    # A002.jpg falta -> A002.txt es huérfano
+
+    with pytest.raises(ValueError, match="huérfan"):
+        check_no_orphans(str(images_dir), str(labels_dir))
+
+
+def test_T10_sin_huerfanos_pasa(tmp_path):
+    """T10 control: todo cruza correctamente -> no lanza excepción."""
+    images_dir = tmp_path / "images"
+    labels_dir = tmp_path / "labels"
+    images_dir.mkdir()
+    labels_dir.mkdir()
+
+    for stem in ("A001", "A002", "A003"):
+        (images_dir / f"{stem}.jpg").write_bytes(b"fake")
+        (labels_dir / f"{stem}.txt").write_text("0 0.5 0.5 0.5 0.5\n")
+
+    check_no_orphans(str(images_dir), str(labels_dir))  # no debe lanzar
