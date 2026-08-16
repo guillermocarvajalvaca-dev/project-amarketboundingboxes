@@ -297,6 +297,24 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directorio de salida para imágenes. "
+            "Si se especifica, tiene prioridad sobre el YAML."
+        ),
+    )
+
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Ruta del manifest CSV. "
+            "Si se especifica, tiene prioridad sobre el YAML."
+        ),
+    )
+
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
         help=(
@@ -706,9 +724,36 @@ def save_image_idempotently(
             f"distintos: {destination}"
         )
 
-    destination.write_bytes(
-        image_bytes
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        delete=False,
     )
+
+    temp_path = Path(temp_file.name)
+
+    try:
+        with temp_file:
+            temp_file.write(
+                image_bytes
+            )
+            temp_file.flush()
+            os.fsync(
+                temp_file.fileno()
+            )
+
+        os.replace(
+            temp_path,
+            destination,
+        )
+
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        raise
 
     return {
         "status": "created",
@@ -752,6 +797,7 @@ def atomic_write_csv(
                 temp_file,
                 fieldnames=fieldnames,
                 extrasaction="ignore",
+                lineterminator="\n",
             )
 
             writer.writeheader()
@@ -1550,8 +1596,7 @@ def run_smoke_test(
                     "background_mode"
                 ],
                 "rights_status": (
-                    "PILOT_PRIVATE_"
-                    "NO_REDISTRIBUTION"
+                    "REDISTRIBUTION_PROHIBITED"
                 ),
                 "acceptance_status": (
                     "ACCEPTED"
@@ -1668,6 +1713,16 @@ def main():
         args.config
     )
 
+    if args.output_dir is not None:
+        config["outputs"]["images_dir"] = (
+            args.output_dir
+        )
+
+    if args.manifest is not None:
+        config["outputs"]["manifest"] = (
+            args.manifest
+        )
+
     configured_limit = int(
         config["limits"][
             "max_products"
@@ -1716,6 +1771,16 @@ def main():
     print(
         "Max image bytes:",
         config["limits"]["max_image_bytes"],
+    )
+
+    print(
+        "Output dir:",
+        config["outputs"]["images_dir"],
+    )
+
+    print(
+        "Manifest:",
+        config["outputs"]["manifest"],
     )
 
     if not args.smoke_test:

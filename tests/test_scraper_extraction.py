@@ -263,6 +263,43 @@ class TestScraperExtraction(unittest.TestCase):
             accepted.closed
         )
 
+    def test_cli_output_paths_override_yaml(self):
+        """CLI explícito debe tener prioridad sobre las rutas del YAML."""
+
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "src/scraper_extraction.py",
+                "--config",
+                "configs/data_sources.yaml",
+                "--output-dir",
+                "tmp/cli-images",
+                "--manifest",
+                "tmp/cli-manifest.csv",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+        )
+
+        self.assertIn(
+            "Output dir: tmp/cli-images",
+            result.stdout,
+        )
+
+        self.assertIn(
+            "Manifest: tmp/cli-manifest.csv",
+            result.stdout,
+        )
+
     def test_s03_urls_are_unique_canonical_and_sorted(self):
         """S03: URLs duplicadas/desordenadas se normalizan."""
 
@@ -482,6 +519,46 @@ class TestScraperExtraction(unittest.TestCase):
             self.assertEqual(
                 destination.read_bytes(),
                 original_bytes,
+            )
+
+    def test_atomic_image_write_cleans_temp_on_replace_failure(self):
+        """Un fallo en os.replace no debe dejar destino parcial ni temporal."""
+
+        image_bytes = b"contenido-atomico-de-prueba"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = (
+                Path(temp_dir)
+                / "producto.jpg"
+            )
+
+            with patch(
+                "src.scraper_extraction.os.replace",
+                side_effect=OSError(
+                    "fallo-controlado"
+                ),
+            ):
+                with self.assertRaises(
+                    OSError
+                ):
+                    save_image_idempotently(
+                        destination,
+                        image_bytes,
+                    )
+
+            self.assertFalse(
+                destination.exists()
+            )
+
+            temp_files = list(
+                Path(temp_dir).glob(
+                    ".producto.jpg.*.tmp"
+                )
+            )
+
+            self.assertEqual(
+                temp_files,
+                [],
             )
 
     def test_s08_same_bytes_different_urls_share_duplicate_group(self):
