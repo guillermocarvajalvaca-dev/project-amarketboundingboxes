@@ -234,3 +234,99 @@ def check_no_orphans(images_dir: str, labels_dir: str) -> None:
         if orphan_labels:
             details.append(f"labels huérfanos (sin imagen): {orphan_labels}")
         raise ValueError("Gate T10 falla — " + "; ".join(details))
+
+
+def audit_image(
+    image_path: str,
+    source_asset_id: str,
+    sku_id: str,
+    labels_dir: str,
+    alpha_threshold: float,
+    algorithm_version: str,
+    class_id: int = 0,
+) -> dict:
+    """Procesa una imagen y devuelve una fila de auditoría (§7 contrato):
+    29 columnas exactas. Un rechazo conserva fila y no crea .txt.
+
+    Reutiliza load_and_validate_image, make_mask_from_alpha y
+    compute_yolo_box; no reimplementa la fórmula YOLO.
+    """
+    import hashlib
+    import json
+    import os
+
+    params = {"alpha_threshold": alpha_threshold, "algorithm_version": algorithm_version}
+    parameters_hash = hashlib.sha256(
+        json.dumps(params, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    with open(image_path, "rb") as f:
+        file_bytes = f.read()
+    source_sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+    row = {
+        "source_asset_id": source_asset_id,
+        "sku_id": sku_id,
+        "class_id": class_id,
+        "image_path": image_path,
+        "label_path": "",
+        "image_width_px": 0,
+        "image_height_px": 0,
+        "mask_method": "alpha",
+        "algorithm_version": algorithm_version,
+        "parameters_hash": parameters_hash,
+        "foreground_pixel_count": 0,
+        "x_min": 0, "y_min": 0, "x_max": 0, "y_max": 0,
+        "x0": 0, "y0": 0, "x1": 0, "y1": 0,
+        "x_center_px": 0.0, "y_center_px": 0.0,
+        "box_width_px": 0, "box_height_px": 0,
+        "x_center": 0.0, "y_center": 0.0, "width": 0.0, "height": 0.0,
+        "source_sha256": source_sha256,
+        "status": "accepted",
+        "rejection_reason": "",
+    }
+
+    try:
+        rgba = load_and_validate_image(image_path)
+        h, w = rgba.shape[0], rgba.shape[1]
+        row["image_width_px"] = w
+        row["image_height_px"] = h
+
+        mask = make_mask_from_alpha(rgba, alpha_threshold)
+
+        ys, xs = mask.nonzero()
+        x_min, x_max = int(xs.min()), int(xs.max())
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x0, y0 = x_min, y_min
+        x1, y1 = x_max + 1, y_max + 1
+        box_width_px = x1 - x0
+        box_height_px = y1 - y0
+        x_center_px = x0 + box_width_px / 2
+        y_center_px = y0 + box_height_px / 2
+
+        yolo_line = compute_yolo_box(mask, class_id=class_id)
+        _, x_center, y_center, width, height = yolo_line.split()
+
+        os.makedirs(labels_dir, exist_ok=True)
+        label_path = os.path.join(labels_dir, f"{source_asset_id}.txt")
+        with open(label_path, "w") as f:
+            f.write(yolo_line + "\n")
+
+        row.update({
+            "label_path": label_path,
+            "foreground_pixel_count": int(mask.sum()),
+            "x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max,
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "x_center_px": x_center_px, "y_center_px": y_center_px,
+            "box_width_px": box_width_px, "box_height_px": box_height_px,
+            "x_center": float(x_center), "y_center": float(y_center),
+            "width": float(width), "height": float(height),
+            "status": "accepted",
+            "rejection_reason": "",
+        })
+    except ValueError as e:
+        row["status"] = "rejected"
+        row["rejection_reason"] = str(e)
+        row["label_path"] = ""
+
+    return row
