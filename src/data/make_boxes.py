@@ -162,3 +162,38 @@ def make_mask_from_rgb(
         )
 
     return mask
+
+
+def load_and_validate_image(path: str) -> np.ndarray:
+    """
+    Carga una imagen desde disco y valida que sea decodificable, §3 del contrato:
+    "imagen decodificable con W>0, H>0".
+
+    Args:
+        path: ruta al archivo de imagen.
+
+    Returns:
+        array numpy (H, W, C) con la imagen decodificada.
+
+    Raises:
+        ValueError: si el archivo no es decodificable como imagen, o si
+        W<=0 o H<=0 (rechazo trazable, §9 del contrato T09).
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        img = Image.open(path)
+        img.load()  # fuerza la decodificación completa, no solo el header
+    except (UnidentifiedImageError, OSError) as e:
+        raise ValueError(f"Imagen no decodificable en '{path}': {e}") from e
+
+    arr = np.array(img)
+
+    if arr.ndim < 2:
+        raise ValueError(f"Imagen no decodificable en '{path}': shape inválido {arr.shape}")
+
+    H, W = arr.shape[0], arr.shape[1]
+    if W <= 0 or H <= 0:
+        raise ValueError(f"Imagen no decodificable en '{path}': W={W}, H={H} debe ser >0")
+
+    return arr

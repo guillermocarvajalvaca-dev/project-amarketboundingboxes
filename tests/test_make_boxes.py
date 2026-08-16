@@ -103,10 +103,28 @@ def test_T08_clase_distinta_de_cero():
         compute_yolo_box(mask, class_id=1)
 
 
-def test_T09_imagen_corrupta():
-    """imagen corrupta -> rechazo trazable (placeholder: requiere función de carga de imagen,
-    no solo compute_yolo_box; ajustar cuando se implemente load_and_validate_image)"""
-    pytest.skip("Pendiente: requiere implementar carga/validación de imagen corrupta")
+def test_T09_imagen_corrupta(tmp_path):
+    """imagen corrupta -> rechazo trazable"""
+    from src.data.make_boxes import load_and_validate_image
+
+    corrupt_path = tmp_path / "corrupt.png"
+    corrupt_path.write_bytes(b"esto no es una imagen valida, solo bytes basura")
+
+    with pytest.raises(ValueError, match="decodificable"):
+        load_and_validate_image(str(corrupt_path))
+
+
+def test_T09b_imagen_valida_decodifica(tmp_path):
+    """control: una imagen válida sí debe decodificar sin error"""
+    from PIL import Image
+    from src.data.make_boxes import load_and_validate_image
+
+    valid_path = tmp_path / "valid.png"
+    img = Image.new("RGB", (10, 8), color=(255, 0, 0))
+    img.save(valid_path)
+
+    result = load_and_validate_image(str(valid_path))
+    assert result.shape[:2] == (8, 10)  # (H, W, ...)
 
 
 def test_T10_label_imagen_huerfano():
