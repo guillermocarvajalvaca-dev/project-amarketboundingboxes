@@ -793,7 +793,7 @@ class TestScraperExtraction(unittest.TestCase):
                     "height_px": "700",
                     "image_mode": "RGB",
                     "background_mode": "UNIFORM_RGB",
-                    "rights_status": "PILOT_PRIVATE",
+                    "rights_status": "REDISTRIBUTION_PROHIBITED",
                     "acceptance_status": "ACCEPTED",
                     "rejection_reason": "",
                     "local_path": str(
@@ -829,7 +829,7 @@ class TestScraperExtraction(unittest.TestCase):
                     "height_px": "700",
                     "image_mode": "RGB",
                     "background_mode": "UNIFORM_RGB",
-                    "rights_status": "PILOT_PRIVATE",
+                    "rights_status": "REDISTRIBUTION_PROHIBITED",
                     "acceptance_status": "ACCEPTED",
                     "rejection_reason": "",
                     "local_path": str(
