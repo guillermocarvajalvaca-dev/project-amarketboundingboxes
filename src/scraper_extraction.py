@@ -194,8 +194,21 @@ class PoliteHttpClient:
         if remaining > 0:
             time.sleep(remaining)
 
-    def get(self, url):
+    def get(self, url, max_bytes=None):
         self._wait_if_needed()
+
+        if max_bytes is not None:
+            try:
+                max_bytes = int(max_bytes)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "max_bytes debe ser un entero positivo."
+                ) from error
+
+            if max_bytes <= 0:
+                raise ValueError(
+                    "max_bytes debe ser un entero positivo."
+                )
 
         response = request_with_retries(
             url=url,
@@ -216,7 +229,38 @@ class PoliteHttpClient:
                 "",
             )
 
-            body = response.read()
+            if max_bytes is None:
+                body = response.read()
+
+            else:
+                content_length = response.headers.get(
+                    "Content-Length"
+                )
+
+                if content_length:
+                    try:
+                        declared_size = int(
+                            content_length
+                        )
+                    except (TypeError, ValueError):
+                        declared_size = None
+
+                    if (
+                        declared_size is not None
+                        and declared_size > max_bytes
+                    ):
+                        raise RuntimeError(
+                            "IMAGE_TOO_LARGE"
+                        )
+
+                body = response.read(
+                    max_bytes + 1
+                )
+
+                if len(body) > max_bytes:
+                    raise RuntimeError(
+                        "IMAGE_TOO_LARGE"
+                    )
 
         finally:
             response.close()
@@ -308,6 +352,7 @@ def load_config(config_path):
         "limits": (
             "max_products",
             "max_images_per_product",
+            "max_image_bytes",
         ),
         "outputs": (
             "images_dir",
@@ -336,6 +381,22 @@ def load_config(config_path):
         raise ValueError(
             "El smoke test permite una imagen "
             "principal por producto."
+        )
+
+    try:
+        max_image_bytes = int(
+            config["limits"]["max_image_bytes"]
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "limits.max_image_bytes debe ser "
+            "un entero positivo."
+        ) from error
+
+    if max_image_bytes <= 0:
+        raise ValueError(
+            "limits.max_image_bytes debe ser "
+            "un entero positivo."
         )
 
     return config
@@ -1360,7 +1421,12 @@ def run_smoke_test(
                 )
 
             image_response = client.get(
-                image_url
+                image_url,
+                max_bytes=int(
+                    config["limits"][
+                        "max_image_bytes"
+                    ]
+                ),
             )
 
             if (
@@ -1498,10 +1564,9 @@ def run_smoke_test(
 
             if asset_id not in manifest_by_id:
                 accepted_this_run += 1
-
-            manifest_by_id[
-                asset_id
-            ] = row
+                manifest_by_id[
+                    asset_id
+                ] = row
 
             print(
                 "      ACCEPTED "

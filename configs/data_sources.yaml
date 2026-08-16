@@ -12,6 +12,7 @@ http:
 limits:
   max_products: 3
   max_images_per_product: 1
+  max_image_bytes: 1048576
 
 outputs:
   images_dir: data/raw/amarket

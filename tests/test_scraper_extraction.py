@@ -10,10 +10,12 @@ from urllib.error import HTTPError
 
 from src.scraper_extraction import (
     MANIFEST_FIELDS,
+    PoliteHttpClient,
     atomic_write_csv,
     atomic_write_json,
     calculate_sha256,
     duplicate_group_id,
+    load_config,
     normalize_product_urls,
     reconcile_outputs,
     request_with_retries,
@@ -92,6 +94,173 @@ class TestScraperExtraction(unittest.TestCase):
         self.assertIn(
             "Falta la sección obligatoria",
             result.stderr,
+        )
+
+    def test_config_requires_max_image_bytes(self):
+        """La configuración debe declarar el límite de imagen."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = (
+                Path(temp_dir)
+                / "missing_max_image_bytes.yaml"
+            )
+
+            config_path.write_text(
+                "source:\n"
+                "  name: AMARKET\n"
+                "  collection_url: "
+                "https://amarket.com.bo/collections/lo-nuevo\n"
+                "http:\n"
+                "  user_agent: "
+                "PROJECT_AMARKETBOUNDINGBOXES/1.0 "
+                "academic-smoke-test\n"
+                "  delay_seconds: 1.0\n"
+                "  timeout_seconds: 20\n"
+                "  max_retries: 3\n"
+                "  backoff_seconds: 2.0\n"
+                "limits:\n"
+                "  max_products: 3\n"
+                "  max_images_per_product: 1\n"
+                "outputs:\n"
+                "  images_dir: data/raw/amarket\n"
+                "  manifest: "
+                "data/manifests/source_assets.csv\n"
+                "  rejects: "
+                "data/manifests/scrape_rejections.csv\n"
+                "  summary: "
+                "outputs/scrape_summary.json\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as context:
+                load_config(config_path)
+
+            self.assertIn(
+                "limits.max_image_bytes",
+                str(context.exception),
+            )
+
+    def test_image_download_size_limit_is_enforced(self):
+        """La descarga de imagen debe respetar max_bytes."""
+
+        config = {
+            "http": {
+                "user_agent": (
+                    "PROJECT_AMARKETBOUNDINGBOXES/1.0 "
+                    "academic-smoke-test"
+                ),
+                "delay_seconds": 0,
+                "timeout_seconds": 20,
+                "max_retries": 3,
+                "backoff_seconds": 0,
+            }
+        }
+
+        client = PoliteHttpClient(config)
+
+        class FakeResponse:
+            def __init__(
+                self,
+                body,
+                content_length=None,
+            ):
+                self.status = 200
+                self.body = body
+                self.read_called = False
+                self.closed = False
+                self.headers = {
+                    "Content-Type": "image/jpeg",
+                }
+
+                if content_length is not None:
+                    self.headers[
+                        "Content-Length"
+                    ] = str(content_length)
+
+            def getcode(self):
+                return self.status
+
+            def read(self, amount=None):
+                self.read_called = True
+
+                if amount is None:
+                    return self.body
+
+                return self.body[:amount]
+
+            def close(self):
+                self.closed = True
+
+        declared_too_large = FakeResponse(
+            body=b"x" * 10,
+            content_length=1_048_577,
+        )
+
+        with patch(
+            "src.scraper_extraction.request_with_retries",
+            return_value=declared_too_large,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "IMAGE_TOO_LARGE",
+            ):
+                client.get(
+                    "https://amarket.com.bo/test.jpg",
+                    max_bytes=1_048_576,
+                )
+
+        self.assertFalse(
+            declared_too_large.read_called
+        )
+        self.assertTrue(
+            declared_too_large.closed
+        )
+
+        body_too_large = FakeResponse(
+            body=b"x" * 1_048_577,
+            content_length=None,
+        )
+
+        with patch(
+            "src.scraper_extraction.request_with_retries",
+            return_value=body_too_large,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "IMAGE_TOO_LARGE",
+            ):
+                client.get(
+                    "https://amarket.com.bo/test.jpg",
+                    max_bytes=1_048_576,
+                )
+
+        self.assertTrue(
+            body_too_large.read_called
+        )
+        self.assertTrue(
+            body_too_large.closed
+        )
+
+        accepted = FakeResponse(
+            body=b"x" * 100,
+            content_length=100,
+        )
+
+        with patch(
+            "src.scraper_extraction.request_with_retries",
+            return_value=accepted,
+        ):
+            result = client.get(
+                "https://amarket.com.bo/test.jpg",
+                max_bytes=1_048_576,
+            )
+
+        self.assertEqual(
+            len(result["body"]),
+            100,
+        )
+        self.assertTrue(
+            accepted.closed
         )
 
     def test_s03_urls_are_unique_canonical_and_sorted(self):
