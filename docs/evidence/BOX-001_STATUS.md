@@ -96,3 +96,13 @@ source .venv/bin/activate
 pytest tests/test_make_boxes.py -v
 # Siguiente paso: crear outputs/box_audit.csv + grilla visual
 ```
+
+## Acción futura asignada — reproducción independiente de SCR-001
+Guillermo (18:xx) le pidió a Monserrat corregir 2 fixtures en
+tests/test_scraper_extraction.py: "rights_status": "PILOT_PRIVATE" no
+pertenece al enum FROZEN, debe ser "REDISTRIBUTION_PROHIBITED". Cuando
+Monserrat publique el nuevo commit con los 15 tests corriendo:
+- Me toca reproducir su suite de forma INDEPENDIENTE en mi máquina
+  (clonar/pull su rama, correr los 15 tests, confirmar mismo resultado)
+- Esto es requisito explícito antes de aprobar y mergear su PR
+- Aún no ocurrió — solo Guillermo le pidió el fix a ella, esperando su commit
