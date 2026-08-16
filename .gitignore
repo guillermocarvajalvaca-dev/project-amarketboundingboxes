@@ -17,6 +17,10 @@ data/raw/
 data/processed/
 data/labels/
 
+# Fixture de tests (TRN-001): se regenera con tests/generate_fixture.py,
+# contiene un path absoluto propio de cada maquina -- no se versiona.
+tests/fixtures/
+
 # Salidas generadas
 outputs/*
 !outputs/.gitkeep
