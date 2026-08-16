@@ -59,11 +59,30 @@ La observación de ese bloqueo se registra en la sección 3 y en
 
 ## 3. Resultado observado
 
-Se completa al abrir el PR, antes de cualquier aprobación.
+Observado el 2026-08-16 sobre el PR #8, **antes de cualquier aprobación**.
 
-- PR: _(ver sección actualizada tras la apertura)_
-- Estado de fusión observado: _(pendiente)_
-- Revisión requerida: _(pendiente)_
+Comando:
+
+```
+gh pr view 8 --json mergeable,mergeStateStatus,reviewDecision,reviewRequests
+gh api repos/.../pulls/8 --jq '.mergeable_state'
+```
+
+| Campo | Valor observado | Lectura |
+|---|---|---|
+| `mergeable` | `MERGEABLE` | no hay conflictos de contenido |
+| `mergeStateStatus` | **`BLOCKED`** | la protección impide la fusión |
+| `mergeable_state` (REST) | **`blocked`** | confirma lo anterior por la otra API |
+| `reviewDecision` | **`REVIEW_REQUIRED`** | falta la aprobación exigida |
+| `reviewRequests` | `mbarbacardozo` | revisión del code owner solicitada |
+
+**Conclusión: la regla se comporta según lo configurado.** El PR no es fusionable pese a
+no tener conflictos y pese a que su autor administra el repositorio. `enforce_admins = true`
+se comporta como se esperaba: el coordinador no puede saltarse la revisión.
+
+No se intentó forzar la fusión. El merge ocurrirá cuando `@mbarbacardozo` apruebe.
+
+Puntos 9 y 10 del checklist: **cerrados**.
 
 ## 4. Nota sobre el ledger
 
