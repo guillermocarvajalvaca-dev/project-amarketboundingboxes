@@ -66,9 +66,26 @@ def test_T05_toca_bordes_sin_truncar():
 
 
 def test_T06_fondo_no_uniforme():
-    """fondo no uniforme -> rechazo (placeholder: requiere función de detección de máscara RGB,
-    no solo compute_yolo_box; ajustar cuando se implemente make_mask_from_rgb)"""
-    pytest.skip("Pendiente: requiere implementar detección de máscara RGB con fondo no uniforme")
+    """fondo no uniforme -> rechazo"""
+    from src.data.make_boxes import make_mask_from_rgb
+
+    h, w = 20, 20
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[:, :] = [255, 255, 255]  # fondo blanco base
+    # Ruido fuerte en el borde para romper la uniformidad
+    rng = np.random.default_rng(42)
+    img[0, :] = rng.integers(0, 255, size=(w, 3))
+    img[-1, :] = rng.integers(0, 255, size=(w, 3))
+    img[:, 0] = rng.integers(0, 255, size=(h, 3))
+    img[:, -1] = rng.integers(0, 255, size=(h, 3))
+
+    with pytest.raises(ValueError, match="fondo no uniforme"):
+        make_mask_from_rgb(
+            img,
+            background_uniformity_tolerance=5.0,
+            foreground_delta=30.0,
+            min_foreground_pixels=10,
+        )
 
 
 def test_T07_idempotencia():

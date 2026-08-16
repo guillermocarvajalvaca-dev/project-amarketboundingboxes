@@ -64,3 +64,101 @@ def compute_yolo_box(mask: np.ndarray, class_id: int = 0) -> str:
     height = box_height_px / H
 
     return f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+
+
+def make_mask_from_alpha(rgba: np.ndarray, alpha_threshold: float) -> np.ndarray:
+    """
+    Genera máscara de foreground desde un canal alpha real (RGBA), §4 del contrato.
+
+    Args:
+        rgba: array (H, W, 4) uint8.
+        alpha_threshold: umbral por encima del cual un píxel es foreground.
+
+    Returns:
+        máscara booleana (H, W).
+
+    Raises:
+        ValueError: si el canal alpha está completamente opaco (no demuestra
+        transparencia real; debe procesarse como caso RGB en su lugar).
+    """
+    if rgba.ndim != 3 or rgba.shape[2] != 4:
+        raise ValueError(f"Se esperaba array RGBA (H,W,4); recibido shape: {rgba.shape}")
+
+    alpha = rgba[:, :, 3].astype(float)
+
+    if np.all(alpha == 255) or np.all(alpha == alpha.max()):
+        raise ValueError(
+            "Canal alpha completamente opaco: no demuestra fondo transparente real, "
+            "usar make_mask_from_rgb en su lugar."
+        )
+
+    return alpha > alpha_threshold
+
+
+def make_mask_from_rgb(
+    rgb: np.ndarray,
+    background_uniformity_tolerance: float,
+    foreground_delta: float,
+    min_foreground_pixels: int,
+) -> np.ndarray:
+    """
+    Genera máscara de foreground desde una imagen RGB con fondo uniforme, §4 del contrato.
+
+    Pasos (según contrato):
+    1. Reunir píxeles del borde.
+    2. Calcular color de fondo por mediana de canal.
+    3. Verificar uniformidad del borde con tolerancia configurada.
+    4. Calcular distancia de cada píxel al fondo.
+    5. Marcar primer plano cuando la distancia supera foreground_delta.
+    6. Rechazar si fondo, máscara o número de componentes no satisfacen el contrato.
+
+    Args:
+        rgb: array (H, W, 3) uint8.
+        background_uniformity_tolerance: desviación máxima permitida en el borde.
+        foreground_delta: distancia mínima al color de fondo para ser foreground.
+        min_foreground_pixels: mínimo de píxeles foreground para aceptar la máscara.
+
+    Returns:
+        máscara booleana (H, W).
+
+    Raises:
+        ValueError: si el fondo no es uniforme, o si el foreground resultante
+        es menor a min_foreground_pixels (rechazo).
+    """
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"Se esperaba array RGB (H,W,3); recibido shape: {rgb.shape}")
+
+    H, W, _ = rgb.shape
+
+    # 1. Reunir píxeles del borde
+    border_pixels = np.concatenate([
+        rgb[0, :, :],
+        rgb[-1, :, :],
+        rgb[:, 0, :],
+        rgb[:, -1, :],
+    ], axis=0).astype(float)
+
+    # 2. Color de fondo por mediana de canal
+    background_color = np.median(border_pixels, axis=0)
+
+    # 3. Verificar uniformidad del borde
+    border_distances = np.linalg.norm(border_pixels - background_color, axis=1)
+    if border_distances.std() > background_uniformity_tolerance:
+        raise ValueError(
+            f"fondo no uniforme: desviación del borde ({border_distances.std():.2f}) "
+            f"excede la tolerancia ({background_uniformity_tolerance})"
+        )
+
+    # 4. Distancia de cada píxel al fondo
+    pixel_distances = np.linalg.norm(rgb.astype(float) - background_color, axis=2)
+
+    # 5. Foreground cuando la distancia supera foreground_delta
+    mask = pixel_distances > foreground_delta
+
+    # 6. Rechazar si el foreground es insuficiente
+    if mask.sum() < min_foreground_pixels:
+        raise ValueError(
+            f"foreground insuficiente: {mask.sum()} píxeles, mínimo requerido: {min_foreground_pixels}"
+        )
+
+    return mask
