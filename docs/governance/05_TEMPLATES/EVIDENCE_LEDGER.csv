@@ -1,0 +1,1 @@
+evidence_id,gate_id,requirement_id,artifact_path,artifact_version,commit_sha,command,exit_code,executed_at,executed_by,result_summary,log_path,status

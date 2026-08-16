@@ -1,0 +1,32 @@
+# Secretos y entorno
+.env
+.env.*
+!.env.example
+
+# Entornos virtuales
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Datos (no se versionan; ver docs/governance/02_CONTRACTS)
+data/raw/
+data/processed/
+data/labels/
+
+# Salidas generadas
+outputs/*
+!outputs/.gitkeep
+
+# Pesos y modelos
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Sistema operativo
+.DS_Store
+Thumbs.db

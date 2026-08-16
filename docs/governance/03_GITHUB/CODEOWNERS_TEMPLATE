@@ -1,0 +1,14 @@
+# Este archivo asigna revisores, no autoría. Copiar a .github/CODEOWNERS.
+/src/scraper_extraction.py                 @andrespoiche
+/src/data/validate_downloads.py            @andrespoiche
+/configs/data_sources.yaml                 @guillermocarvajalvaca-dev
+/src/data/make_boxes.py                    @mbarbacardozo
+/src/data/make_splits.py                   @guillermocarvajalvaca-dev
+/configs/dataset.yaml                      @Pablolinares1801
+/src/train.py                              @guillermocarvajalvaca-dev
+/src/evaluate.py                           @guillermocarvajalvaca-dev
+/src/predict.py                            @Pablolinares1801
+/notebooks/inferencia_cpu.ipynb            @andrespoiche
+/README.md                                 @mbarbacardozo
+/informe/                                  @Pablolinares1801
+/docs/governance/                          @mbarbacardozo

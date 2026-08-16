@@ -1,0 +1,127 @@
+contract_name: project_amarketboundingboxes_data_and_split_contract
+contract_version: 1.0.0-FROZEN
+status: FROZEN
+evidence_as_of: 2026-08-16
+no_evidence_policy: ABSTAIN
+
+class_schema:
+  task: object_detection
+  number_of_classes: 1
+  names:
+    0: product
+  metadata_not_classes:
+    - sku_id
+    - product_name
+    - description
+
+source_asset:
+  primary_key: source_asset_id
+  constants:
+    source_name: AMARKET
+  required_fields:
+    - source_asset_id
+    - sku_id
+    - product_name
+    - description
+    - source_name
+    - product_page_url
+    - image_url
+    - retrieved_at
+    - retrieval_run_id
+    - http_status
+    - content_type
+    - scraper_version
+    - sha256
+    - duplicate_group_id
+    - width_px
+    - height_px
+    - image_mode
+    - background_mode
+    - rights_status
+    - acceptance_status
+    - rejection_reason
+    - local_path
+  enums:
+    background_mode: [TRANSPARENT_ALPHA, UNIFORM_RGB, NOT_ACCEPTABLE]
+    acceptance_status: [ACCEPTED, REJECTED]
+    rights_status:
+      - VERIFIED_REUSABLE
+      - COURSE_USE_ONLY
+      - REDISTRIBUTION_PROHIBITED
+      - UNKNOWN
+
+annotated_asset:
+  primary_key: source_asset_id
+  constants:
+    class_id: 0
+  cardinality:
+    products_per_image: 1
+    labels_per_accepted_image: 1
+  required_fields:
+    - source_asset_id
+    - sku_id
+    - class_id
+    - image_path
+    - label_path
+    - box_algorithm_version
+    - parameters_hash
+    - source_sha256
+
+yolo_label:
+  format: "0 x_center y_center width height"
+  decimals: 6
+  invariants:
+    - "class_id == 0"
+    - "0 <= x_center <= 1"
+    - "0 <= y_center <= 1"
+    - "0 < width <= 1"
+    - "0 < height <= 1"
+    - "exactly one label for every accepted image"
+    - "no label for rejected image"
+
+split_policy:
+  fixed_seed: PENDING_O_002
+  ratios: PENDING_O_002
+  group_exclusivity:
+    - sku_id
+    - source_asset_id
+    - duplicate_group_id
+  derivative_rule: >-
+    No SKU, source asset, exact/perceptual duplicate or derivative may cross
+    train, validation and test. Group assignment occurs before augmentation.
+  class_rule: "class_id 0 must be represented in every non-empty split"
+  test_lock: true
+
+quality_rules:
+  accepted_images_decode: MUST_PASS
+  exact_duplicates_resolved: MUST_PASS
+  invalid_boxes: 0
+  orphan_labels: 0
+  orphan_images: 0
+  cross_split_group_violations: 0
+  rejected_items_have_reason: MUST_PASS
+  background_mode_acceptable: MUST_PASS
+  bbox_tests_T01_T10: MUST_PASS
+  final_dataset_size: PENDING_O_001
+
+publication:
+  git_allow:
+    - small_permitted_sample
+    - manifests_without_secrets
+    - code_configs_tests_docs
+  git_deny:
+    - full_dataset
+    - large_weights
+    - credentials_or_cookies
+    - personal_data
+  external_location: GOOGLE_DRIVE_PROJECT_FOLDER
+  redistribution: PENDING_O_007
+
+outputs:
+  - data/manifests/source_assets.csv
+  - data/manifests/scrape_rejections.csv
+  - data/manifests/splits.csv
+  - configs/dataset.yaml
+  - outputs/box_audit.csv
+  - outputs/scrape_summary.json
+  - outputs/data_quality_report.json

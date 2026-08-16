@@ -1,0 +1,3 @@
+# Sin conversión de fin de línea: los archivos se almacenan y extraen byte a byte.
+# Necesario para que docs/governance/MANIFEST.sha256 valide en cualquier clon.
+* -text
