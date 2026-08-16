@@ -27,6 +27,16 @@ outputs/*
 *.onnx
 *.engine
 
+# Artefactos de compilacion LaTeX (el PDF se genera, no se versiona)
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+informe/*.pdf
+
 # Sistema operativo
 .DS_Store
 Thumbs.db
