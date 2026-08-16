@@ -1,3 +1,5 @@
+import csv
+import json
 import subprocess
 import sys
 import tempfile
@@ -7,9 +9,13 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from src.scraper_extraction import (
+    MANIFEST_FIELDS,
+    atomic_write_csv,
+    atomic_write_json,
     calculate_sha256,
     duplicate_group_id,
     normalize_product_urls,
+    reconcile_outputs,
     request_with_retries,
     save_image_idempotently,
     validate_image_bytes,
@@ -32,16 +38,34 @@ class TestScraperExtraction(unittest.TestCase):
             text=True,
         )
 
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("--config", result.stdout)
-        self.assertIn("--limit", result.stdout)
-        self.assertIn("--smoke-test", result.stdout)
+        self.assertEqual(
+            result.returncode,
+            0,
+        )
+
+        self.assertIn(
+            "--config",
+            result.stdout,
+        )
+
+        self.assertIn(
+            "--limit",
+            result.stdout,
+        )
+
+        self.assertIn(
+            "--smoke-test",
+            result.stdout,
+        )
 
     def test_s02_incomplete_config_fails(self):
         """S02: configuración incompleta debe fallar."""
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "incomplete.yaml"
+            config_path = (
+                Path(temp_dir)
+                / "incomplete.yaml"
+            )
 
             config_path.write_text(
                 "source:\n"
@@ -60,7 +84,10 @@ class TestScraperExtraction(unittest.TestCase):
                 text=True,
             )
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(
+            result.returncode,
+            0,
+        )
 
         self.assertIn(
             "Falta la sección obligatoria",
@@ -77,7 +104,11 @@ class TestScraperExtraction(unittest.TestCase):
             "https://amarket.com.bo/products/a-producto#foto",
         ]
 
-        result = normalize_product_urls(urls)
+        result = (
+            normalize_product_urls(
+                urls
+            )
+        )
 
         expected = [
             "https://amarket.com.bo/products/a-producto",
@@ -116,7 +147,9 @@ class TestScraperExtraction(unittest.TestCase):
             side_effect=error_404,
         ) as mocked_urlopen:
 
-            with self.assertRaises(HTTPError):
+            with self.assertRaises(
+                HTTPError
+            ):
                 request_with_retries(
                     **common_args
                 )
@@ -126,7 +159,10 @@ class TestScraperExtraction(unittest.TestCase):
                 1,
             )
 
-        for status_code in (429, 500):
+        for status_code in (
+            429,
+            500,
+        ):
             error = HTTPError(
                 common_args["url"],
                 status_code,
@@ -140,7 +176,9 @@ class TestScraperExtraction(unittest.TestCase):
                 side_effect=error,
             ) as mocked_urlopen:
 
-                with self.assertRaises(HTTPError):
+                with self.assertRaises(
+                    HTTPError
+                ):
                     request_with_retries(
                         **common_args
                     )
@@ -153,12 +191,16 @@ class TestScraperExtraction(unittest.TestCase):
     def test_s05_non_image_mime_is_rejected(self):
         """S05: MIME que no sea imagen debe rechazarse."""
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(
+            ValueError
+        ):
             validate_image_content_type(
                 "text/html"
             )
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(
+            ValueError
+        ):
             validate_image_content_type(
                 "application/json"
             )
@@ -184,7 +226,9 @@ class TestScraperExtraction(unittest.TestCase):
             b"esto-no-es-una-imagen"
         )
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(
+            ValueError
+        ):
             validate_image_bytes(
                 corrupt_bytes
             )
@@ -198,7 +242,8 @@ class TestScraperExtraction(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             destination = (
-                Path(temp_dir) / "producto.jpg"
+                Path(temp_dir)
+                / "producto.jpg"
             )
 
             first_result = (
@@ -236,7 +281,7 @@ class TestScraperExtraction(unittest.TestCase):
             )
 
     def test_s07_different_bytes_do_not_overwrite(self):
-        """S07: bytes distintos no sobrescriben evidencia previa."""
+        """S07: bytes distintos no sobrescriben evidencia."""
 
         original_bytes = (
             b"version-original"
@@ -248,7 +293,8 @@ class TestScraperExtraction(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             destination = (
-                Path(temp_dir) / "producto.jpg"
+                Path(temp_dir)
+                / "producto.jpg"
             )
 
             save_image_idempotently(
@@ -286,12 +332,16 @@ class TestScraperExtraction(unittest.TestCase):
             b"misma-imagen-binaria"
         )
 
-        group_a = duplicate_group_id(
-            image_bytes
+        group_a = (
+            duplicate_group_id(
+                image_bytes
+            )
         )
 
-        group_b = duplicate_group_id(
-            image_bytes
+        group_b = (
+            duplicate_group_id(
+                image_bytes
+            )
         )
 
         self.assertNotEqual(
@@ -312,7 +362,7 @@ class TestScraperExtraction(unittest.TestCase):
         )
 
     def test_s09_resume_preserves_previous_success(self):
-        """S09: reanudar conserva éxitos ya guardados."""
+        """S09: reanudar conserva éxitos guardados."""
 
         first_bytes = (
             b"imagen-producto-uno"
@@ -323,21 +373,25 @@ class TestScraperExtraction(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
+            temp_path = Path(
+                temp_dir
+            )
 
             first_destination = (
-                temp_path / "producto_1.jpg"
+                temp_path
+                / "producto_1.jpg"
             )
 
             second_destination = (
-                temp_path / "producto_2.jpg"
+                temp_path
+                / "producto_2.jpg"
             )
 
-            # Primera ejecución:
-            # producto 1 se guarda correctamente.
-            first_run = save_image_idempotently(
-                first_destination,
-                first_bytes,
+            first_run = (
+                save_image_idempotently(
+                    first_destination,
+                    first_bytes,
+                )
             )
 
             self.assertEqual(
@@ -345,20 +399,16 @@ class TestScraperExtraction(unittest.TestCase):
                 "created",
             )
 
-            first_hash_before_resume = (
+            first_hash_before = (
                 calculate_sha256(
                     first_destination.read_bytes()
                 )
             )
 
-            # Aquí simulamos una interrupción:
-            # producto 2 todavía no fue guardado.
             self.assertFalse(
                 second_destination.exists()
             )
 
-            # Reanudación:
-            # producto 1 debe conservarse sin duplicarse.
             resumed_first = (
                 save_image_idempotently(
                     first_destination,
@@ -371,7 +421,6 @@ class TestScraperExtraction(unittest.TestCase):
                 "existing",
             )
 
-            # Ahora continúa con el producto pendiente.
             resumed_second = (
                 save_image_idempotently(
                     second_destination,
@@ -384,16 +433,15 @@ class TestScraperExtraction(unittest.TestCase):
                 "created",
             )
 
-            first_hash_after_resume = (
+            first_hash_after = (
                 calculate_sha256(
                     first_destination.read_bytes()
                 )
             )
 
-            # El éxito anterior quedó intacto.
             self.assertEqual(
-                first_hash_before_resume,
-                first_hash_after_resume,
+                first_hash_before,
+                first_hash_after,
             )
 
             self.assertEqual(
@@ -404,6 +452,263 @@ class TestScraperExtraction(unittest.TestCase):
             self.assertEqual(
                 second_destination.read_bytes(),
                 second_bytes,
+            )
+
+    def test_s10_files_rows_and_counts_reconcile(self):
+        """S10: archivos, manifest, rechazos y resumen reconcilian."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(
+                temp_dir
+            )
+
+            images_dir = (
+                root
+                / "data"
+                / "raw"
+                / "amarket"
+            )
+
+            manifest_path = (
+                root
+                / "data"
+                / "manifests"
+                / "source_assets.csv"
+            )
+
+            rejects_path = (
+                root
+                / "data"
+                / "manifests"
+                / "scrape_rejections.csv"
+            )
+
+            summary_path = (
+                root
+                / "outputs"
+                / "scrape_summary.json"
+            )
+
+            image_a = (
+                b"imagen-aceptada-a"
+            )
+
+            image_b = (
+                b"imagen-aceptada-b"
+            )
+
+            path_a = (
+                images_dir
+                / "sku_a.jpg"
+            )
+
+            path_b = (
+                images_dir
+                / "sku_b.jpg"
+            )
+
+            save_image_idempotently(
+                path_a,
+                image_a,
+            )
+
+            save_image_idempotently(
+                path_b,
+                image_b,
+            )
+
+            manifest_rows = [
+                {
+                    "source_asset_id": "asset-a",
+                    "sku_id": "sku-a",
+                    "product_name": "Producto A",
+                    "description": "",
+                    "source_name": "AMARKET",
+                    "product_page_url": (
+                        "https://amarket.com.bo/products/a"
+                    ),
+                    "image_url": (
+                        "https://amarket.com.bo/cdn/shop/files/a.jpg"
+                    ),
+                    "retrieved_at": "2026-08-16T12:00:00-04:00",
+                    "retrieval_run_id": "run-test",
+                    "http_status": "200",
+                    "content_type": "image/jpeg",
+                    "scraper_version": "1.0.0",
+                    "sha256": calculate_sha256(
+                        image_a
+                    ),
+                    "duplicate_group_id": (
+                        duplicate_group_id(
+                            image_a
+                        )
+                    ),
+                    "width_px": "700",
+                    "height_px": "700",
+                    "image_mode": "RGB",
+                    "background_mode": "UNIFORM_RGB",
+                    "rights_status": "PILOT_PRIVATE",
+                    "acceptance_status": "ACCEPTED",
+                    "rejection_reason": "",
+                    "local_path": str(
+                        path_a
+                    ),
+                },
+                {
+                    "source_asset_id": "asset-b",
+                    "sku_id": "sku-b",
+                    "product_name": "Producto B",
+                    "description": "",
+                    "source_name": "AMARKET",
+                    "product_page_url": (
+                        "https://amarket.com.bo/products/b"
+                    ),
+                    "image_url": (
+                        "https://amarket.com.bo/cdn/shop/files/b.jpg"
+                    ),
+                    "retrieved_at": "2026-08-16T12:00:01-04:00",
+                    "retrieval_run_id": "run-test",
+                    "http_status": "200",
+                    "content_type": "image/jpeg",
+                    "scraper_version": "1.0.0",
+                    "sha256": calculate_sha256(
+                        image_b
+                    ),
+                    "duplicate_group_id": (
+                        duplicate_group_id(
+                            image_b
+                        )
+                    ),
+                    "width_px": "700",
+                    "height_px": "700",
+                    "image_mode": "RGB",
+                    "background_mode": "UNIFORM_RGB",
+                    "rights_status": "PILOT_PRIVATE",
+                    "acceptance_status": "ACCEPTED",
+                    "rejection_reason": "",
+                    "local_path": str(
+                        path_b
+                    ),
+                },
+            ]
+
+            rejection_rows = [
+                {
+                    "product_page_url": (
+                        "https://amarket.com.bo/products/rejected"
+                    ),
+                    "image_url": "",
+                    "rejection_reason": "MIME_NOT_IMAGE",
+                }
+            ]
+
+            atomic_write_csv(
+                manifest_path,
+                manifest_rows,
+                MANIFEST_FIELDS,
+            )
+
+            atomic_write_csv(
+                rejects_path,
+                rejection_rows,
+                [
+                    "product_page_url",
+                    "image_url",
+                    "rejection_reason",
+                ],
+            )
+
+            summary = reconcile_outputs(
+                manifest_rows,
+                rejection_rows,
+                images_dir,
+            )
+
+            atomic_write_json(
+                summary_path,
+                summary,
+            )
+
+            self.assertTrue(
+                manifest_path.exists()
+            )
+
+            self.assertTrue(
+                rejects_path.exists()
+            )
+
+            self.assertTrue(
+                summary_path.exists()
+            )
+
+            with manifest_path.open(
+                "r",
+                encoding="utf-8",
+                newline="",
+            ) as file:
+                manifest_file_rows = list(
+                    csv.DictReader(
+                        file
+                    )
+                )
+
+            self.assertEqual(
+                len(manifest_file_rows),
+                2,
+            )
+
+            with rejects_path.open(
+                "r",
+                encoding="utf-8",
+                newline="",
+            ) as file:
+                rejection_file_rows = list(
+                    csv.DictReader(
+                        file
+                    )
+                )
+
+            self.assertEqual(
+                len(rejection_file_rows),
+                1,
+            )
+
+            with summary_path.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+                summary_file = json.load(
+                    file
+                )
+
+            self.assertEqual(
+                summary_file["attempted"],
+                3,
+            )
+
+            self.assertEqual(
+                summary_file["accepted"],
+                2,
+            )
+
+            self.assertEqual(
+                summary_file["rejected"],
+                1,
+            )
+
+            self.assertEqual(
+                summary_file["image_files"],
+                2,
+            )
+
+            self.assertEqual(
+                summary_file["manifest_rows"],
+                2,
+            )
+
+            self.assertEqual(
+                summary_file["rejection_rows"],
+                1,
             )
 
 

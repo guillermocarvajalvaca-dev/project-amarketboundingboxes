@@ -7,7 +7,11 @@ Implementación conforme a SCRAPER_EXTRACTION_CONTRACT v1.0.0.
 """
 
 import argparse
+import csv
 import hashlib
+import json
+import os
+import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
@@ -19,8 +23,45 @@ import yaml
 from PIL import Image, UnidentifiedImageError
 
 
-REQUIRED_SECTIONS = ("source", "http", "limits", "outputs")
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+REQUIRED_SECTIONS = (
+    "source",
+    "http",
+    "limits",
+    "outputs",
+)
+
+RETRYABLE_STATUS_CODES = {
+    429,
+    500,
+    502,
+    503,
+    504,
+}
+
+MANIFEST_FIELDS = [
+    "source_asset_id",
+    "sku_id",
+    "product_name",
+    "description",
+    "source_name",
+    "product_page_url",
+    "image_url",
+    "retrieved_at",
+    "retrieval_run_id",
+    "http_status",
+    "content_type",
+    "scraper_version",
+    "sha256",
+    "duplicate_group_id",
+    "width_px",
+    "height_px",
+    "image_mode",
+    "background_mode",
+    "rights_status",
+    "acceptance_status",
+    "rejection_reason",
+    "local_path",
+]
 
 
 def parse_args():
@@ -62,10 +103,16 @@ def load_config(config_path):
             f"No existe el archivo de configuración: {config_path}"
         )
 
-    with path.open("r", encoding="utf-8") as file:
+    with path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
         config = yaml.safe_load(file)
 
-    if not isinstance(config, dict):
+    if not isinstance(
+        config,
+        dict,
+    ):
         raise ValueError(
             "La configuración YAML debe contener un objeto raíz."
         )
@@ -101,14 +148,16 @@ def canonicalize_product_url(url):
 
 
 def normalize_product_urls(urls):
-    """Canonicaliza, elimina duplicados y ordena URLs de productos."""
+    """Canonicaliza, elimina duplicados y ordena URLs."""
 
     canonical_urls = {
         canonicalize_product_url(url)
         for url in urls
     }
 
-    return sorted(canonical_urls)
+    return sorted(
+        canonical_urls
+    )
 
 
 def request_with_retries(
@@ -127,9 +176,13 @@ def request_with_retries(
         },
     )
 
-    total_attempts = max_retries + 1
+    total_attempts = (
+        max_retries + 1
+    )
 
-    for attempt in range(total_attempts):
+    for attempt in range(
+        total_attempts
+    ):
         try:
             return urlopen(
                 request,
@@ -137,27 +190,43 @@ def request_with_retries(
             )
 
         except HTTPError as error:
-            if error.code not in RETRYABLE_STATUS_CODES:
+            if (
+                error.code
+                not in RETRYABLE_STATUS_CODES
+            ):
                 raise
 
-            if attempt == total_attempts - 1:
+            if (
+                attempt
+                == total_attempts - 1
+            ):
                 raise
 
         except URLError:
-            if attempt == total_attempts - 1:
+            if (
+                attempt
+                == total_attempts - 1
+            ):
                 raise
 
-        sleep_seconds = backoff_seconds * (attempt + 1)
+        sleep_seconds = (
+            backoff_seconds
+            * (attempt + 1)
+        )
 
         if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+            time.sleep(
+                sleep_seconds
+            )
 
     raise RuntimeError(
         "La petición HTTP terminó en un estado inesperado."
     )
 
 
-def validate_image_content_type(content_type):
+def validate_image_content_type(
+    content_type,
+):
     """Valida que Content-Type corresponda a una imagen."""
 
     if not content_type:
@@ -165,12 +234,16 @@ def validate_image_content_type(content_type):
             "Content-Type ausente."
         )
 
-    normalized = content_type.split(
-        ";",
-        1,
-    )[0].strip().lower()
+    normalized = (
+        content_type
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
 
-    if not normalized.startswith("image/"):
+    if not normalized.startswith(
+        "image/"
+    ):
         raise ValueError(
             f"MIME no permitido para imagen: {content_type}"
         )
@@ -178,7 +251,9 @@ def validate_image_content_type(content_type):
     return normalized
 
 
-def validate_image_bytes(image_bytes):
+def validate_image_bytes(
+    image_bytes,
+):
     """Valida que los bytes correspondan a una imagen decodificable."""
 
     if not image_bytes:
@@ -187,10 +262,15 @@ def validate_image_bytes(image_bytes):
         )
 
     try:
-        with Image.open(BytesIO(image_bytes)) as image:
+        with Image.open(
+            BytesIO(image_bytes)
+        ) as image:
             image.verify()
 
-    except (UnidentifiedImageError, OSError) as error:
+    except (
+        UnidentifiedImageError,
+        OSError,
+    ) as error:
         raise ValueError(
             "Los bytes descargados no corresponden "
             "a una imagen válida."
@@ -199,22 +279,35 @@ def validate_image_bytes(image_bytes):
     return True
 
 
-def calculate_sha256(data):
-    """Calcula el hash SHA-256 de bytes."""
+def calculate_sha256(
+    data,
+):
+    """Calcula SHA-256."""
 
-    return hashlib.sha256(data).hexdigest()
-
-
-def duplicate_group_id(image_bytes):
-    """Genera un grupo estable de duplicados a partir de los bytes."""
-
-    return calculate_sha256(image_bytes)
+    return hashlib.sha256(
+        data
+    ).hexdigest()
 
 
-def save_image_idempotently(destination, image_bytes):
-    """Guarda una imagen sin duplicar ni destruir evidencia previa."""
+def duplicate_group_id(
+    image_bytes,
+):
+    """Genera un identificador estable para bytes duplicados."""
 
-    destination = Path(destination)
+    return calculate_sha256(
+        image_bytes
+    )
+
+
+def save_image_idempotently(
+    destination,
+    image_bytes,
+):
+    """Guarda sin duplicar ni sobrescribir bytes distintos."""
+
+    destination = Path(
+        destination
+    )
 
     destination.parent.mkdir(
         parents=True,
@@ -226,22 +319,36 @@ def save_image_idempotently(destination, image_bytes):
     )
 
     if destination.exists():
-        existing_bytes = destination.read_bytes()
-
-        existing_hash = calculate_sha256(
-            existing_bytes
+        existing_bytes = (
+            destination.read_bytes()
         )
 
-        if existing_hash == new_hash:
+        existing_hash = (
+            calculate_sha256(
+                existing_bytes
+            )
+        )
+
+        if (
+            existing_hash
+            == new_hash
+        ):
             return {
                 "status": "existing",
                 "sha256": new_hash,
-                "duplicate_group_id": duplicate_group_id(image_bytes),
-                "path": str(destination),
+                "duplicate_group_id": (
+                    duplicate_group_id(
+                        image_bytes
+                    )
+                ),
+                "path": str(
+                    destination
+                ),
             }
 
         raise FileExistsError(
-            f"El archivo ya existe con bytes distintos: {destination}"
+            "El archivo ya existe con bytes distintos: "
+            f"{destination}"
         )
 
     destination.write_bytes(
@@ -251,8 +358,176 @@ def save_image_idempotently(destination, image_bytes):
     return {
         "status": "created",
         "sha256": new_hash,
-        "duplicate_group_id": duplicate_group_id(image_bytes),
-        "path": str(destination),
+        "duplicate_group_id": (
+            duplicate_group_id(
+                image_bytes
+            )
+        ),
+        "path": str(
+            destination
+        ),
+    }
+
+
+def atomic_write_csv(
+    destination,
+    rows,
+    fieldnames,
+):
+    """Escribe CSV mediante archivo temporal y reemplazo atómico."""
+
+    destination = Path(
+        destination
+    )
+
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        delete=False,
+        dir=destination.parent,
+        prefix=destination.name,
+        suffix=".tmp",
+    )
+
+    temp_path = Path(
+        temp_file.name
+    )
+
+    try:
+        with temp_file:
+            writer = csv.DictWriter(
+                temp_file,
+                fieldnames=fieldnames,
+            )
+
+            writer.writeheader()
+
+            for row in rows:
+                writer.writerow(
+                    row
+                )
+
+        os.replace(
+            temp_path,
+            destination,
+        )
+
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        raise
+
+
+def atomic_write_json(
+    destination,
+    payload,
+):
+    """Escribe JSON mediante archivo temporal y reemplazo atómico."""
+
+    destination = Path(
+        destination
+    )
+
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+        dir=destination.parent,
+        prefix=destination.name,
+        suffix=".tmp",
+    )
+
+    temp_path = Path(
+        temp_file.name
+    )
+
+    try:
+        with temp_file:
+            json.dump(
+                payload,
+                temp_file,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        os.replace(
+            temp_path,
+            destination,
+        )
+
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        raise
+
+
+def reconcile_outputs(
+    manifest_rows,
+    rejection_rows,
+    images_dir,
+):
+    """Reconcilia imágenes, manifest y rechazos."""
+
+    images_dir = Path(
+        images_dir
+    )
+
+    if images_dir.exists():
+        image_files = [
+            path
+            for path in images_dir.iterdir()
+            if path.is_file()
+        ]
+    else:
+        image_files = []
+
+    accepted_count = len(
+        manifest_rows
+    )
+
+    rejected_count = len(
+        rejection_rows
+    )
+
+    attempted_count = (
+        accepted_count
+        + rejected_count
+    )
+
+    image_count = len(
+        image_files
+    )
+
+    if (
+        image_count
+        != accepted_count
+    ):
+        raise ValueError(
+            "Reconciliación inválida: "
+            f"{image_count} archivos para "
+            f"{accepted_count} filas aceptadas."
+        )
+
+    return {
+        "attempted": attempted_count,
+        "accepted": accepted_count,
+        "rejected": rejected_count,
+        "image_files": image_count,
+        "manifest_rows": accepted_count,
+        "rejection_rows": rejected_count,
     }
 
 
@@ -265,9 +540,9 @@ def main():
         args.config
     )
 
-    configured_limit = config[
-        "limits"
-    ]["max_products"]
+    configured_limit = (
+        config["limits"]["max_products"]
+    )
 
     limit = (
         args.limit
@@ -280,21 +555,29 @@ def main():
             "El límite debe ser mayor o igual a 1."
         )
 
-    if limit > configured_limit:
+    if (
+        limit
+        > configured_limit
+    ):
         raise ValueError(
             f"El límite solicitado ({limit}) supera el máximo "
             f"permitido por la configuración ({configured_limit})."
         )
 
-    print("Configuración válida.")
+    print(
+        "Configuración válida."
+    )
+
     print(
         "Fuente:",
         config["source"]["name"],
     )
+
     print(
         "Límite:",
         limit,
     )
+
     print(
         "Smoke test:",
         args.smoke_test,
