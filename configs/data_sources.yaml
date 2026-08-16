@@ -1,0 +1,20 @@
+source:
+  name: AMARKET
+  collection_url: https://amarket.com.bo/collections/lo-nuevo
+
+http:
+  user_agent: PROJECT_AMARKETBOUNDINGBOXES/1.0 academic-smoke-test
+  delay_seconds: 1.0
+  timeout_seconds: 20
+  max_retries: 3
+  backoff_seconds: 2.0
+
+limits:
+  max_products: 3
+  max_images_per_product: 1
+
+outputs:
+  images_dir: data/raw/amarket
+  manifest: data/manifests/source_assets.csv
+  rejects: data/manifests/scrape_rejections.csv
+  summary: outputs/scrape_summary.json
