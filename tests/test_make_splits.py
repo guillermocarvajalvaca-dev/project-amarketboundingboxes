@@ -92,3 +92,21 @@ def test_grupos_insuficientes_detiene_gate():
     )
     with pytest.raises(ValueError, match="grupos insuficientes"):
         make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+
+def test_class_rule_ningun_split_vacio():
+    """§split_policy class_rule: con class_id siempre 0, la regla equivale a
+    que ningún split quede vacío si hay grupos suficientes para los 3."""
+    manifest = sample_manifest()
+    manifest["class_id"] = 0  # dataset de una sola clase, por contrato
+    splits = make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+    present_splits = set(splits["split"])
+    assert present_splits == {"train", "val", "test"}, (
+        f"algún split quedó vacío: presentes={present_splits}"
+    )
+
+    for split_name in ("train", "val", "test"):
+        rows = splits[splits["split"] == split_name]
+        assert (rows["class_id"] == 0).all()
+        assert len(rows) > 0
