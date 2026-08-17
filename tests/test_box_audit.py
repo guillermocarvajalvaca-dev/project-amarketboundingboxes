@@ -105,3 +105,60 @@ def test_audit_image_idempotente_mismos_bytes(tmp_path):
 
     assert bytes1 == bytes2
     assert row1["parameters_hash"] == row2["parameters_hash"]
+
+
+def test_audit_image_label_escritura_atomica_no_deja_parcial_ante_fallo(tmp_path, monkeypatch):
+    """§6 contrato: la escritura del label debe ser atómica. Si falla a
+    mitad de camino, no debe quedar ningún archivo .txt parcial ni
+    temporal en el directorio de labels."""
+    img_path = tmp_path / "A006.png"
+    make_rgba_image(str(img_path))
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+
+    import os as os_module
+
+    def failing_replace(*args, **kwargs):
+        raise OSError("fallo simulado durante la publicación atómica")
+
+    monkeypatch.setattr(os_module, "replace", failing_replace)
+
+    with pytest.raises(OSError):
+        audit_image(
+            image_path=str(img_path),
+            source_asset_id="A006",
+            sku_id="SKU006",
+            labels_dir=str(labels_dir),
+            alpha_threshold=127,
+            algorithm_version="v1",
+        )
+
+    monkeypatch.undo()
+
+    remaining_files = list(labels_dir.iterdir())
+    assert remaining_files == [], (
+        f"no debe quedar ningún archivo tras fallo atómico, encontrado: {remaining_files}"
+    )
+
+
+def test_audit_image_label_atomico_sin_fallo_contenido_correcto(tmp_path):
+    """Control: sin fallo, el label se escribe completo y correcto,
+    sin dejar archivos temporales sueltos."""
+    img_path = tmp_path / "A007.png"
+    make_rgba_image(str(img_path))
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+
+    row = audit_image(
+        image_path=str(img_path),
+        source_asset_id="A007",
+        sku_id="SKU007",
+        labels_dir=str(labels_dir),
+        alpha_threshold=127,
+        algorithm_version="v1",
+    )
+
+    files = list(labels_dir.iterdir())
+    assert len(files) == 1
+    assert files[0].name == "A007.txt"
+    assert row["label_path"] == str(files[0])

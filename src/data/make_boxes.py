@@ -312,8 +312,17 @@ def audit_image(
 
         os.makedirs(labels_dir, exist_ok=True)
         label_path = os.path.join(labels_dir, f"{source_asset_id}.txt")
-        with open(label_path, "w") as f:
-            f.write(yolo_line + "\n")
+        tmp_label_path = label_path + ".tmp"
+        try:
+            with open(tmp_label_path, "w") as f:
+                f.write(yolo_line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_label_path, label_path)
+        except OSError:
+            if os.path.exists(tmp_label_path):
+                os.remove(tmp_label_path)
+            raise
 
         row.update({
             "label_path": label_path,
