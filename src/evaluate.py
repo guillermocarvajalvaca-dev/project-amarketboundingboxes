@@ -25,13 +25,29 @@ Sobre el fixture propio, split val (test queda bloqueado sin --allow-test):
     python src/evaluate.py --model outputs/runs/smoke/weights/best.pt \\
         --data tests/fixtures/mini_dataset/dataset.yaml --split val \\
         --output-dir outputs/evaluation/smoke
+
+Correcciones EVAL-001 (issue #15, defectos detectados por @guillermocarvajalvaca-dev
+en la revision del PR #12):
+    - `n_imagenes` en metrics.json ahora cuenta imagenes reales del split, no
+      `resultado.box.nc` (que es cantidad de clases).
+    - La carpeta de labels se deriva con pathlib (`resolver_carpeta_labels`),
+      no comparando contra `os.sep` -- ver ese docstring para el detalle del
+      bug de Windows que corrige.
+    - Si no se encuentra ningun ground truth real para el split, el CLI
+      falla con codigo no cero en vez de evaluar silenciosamente contra cero.
+    - metrics.json declara explicitamente el alcance de su garantia de
+      determinismo (metricas identicas, contrato seccion 5) y registra
+      commit/entorno/n_imagenes real como evidencia.
 """
 import argparse
 import csv
 import hashlib
 import json
 import os
+import platform
+import subprocess
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -115,14 +131,79 @@ def construir_weight_manifest(ruta_modelo):
     }
 
 
-def calcular_predicciones_y_errores(modelo, carpeta_imagenes, carpeta_labels, conf, iou_umbral, device):
+def obtener_commit_git():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return None
+
+
+def version_paquete(nombre):
+    try:
+        from importlib.metadata import version
+        return version(nombre)
+    except Exception:
+        return None
+
+
+def registrar_entorno(device_declarado):
+    """Evidencia de evaluacion (issue #15, punto 5): commit + entorno + device."""
+    return {
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "git_commit": obtener_commit_git(),
+        "device_declarado": device_declarado,
+        "paquetes": {
+            "torch": version_paquete("torch"),
+            "ultralytics": version_paquete("ultralytics"),
+            "numpy": version_paquete("numpy"),
+            "pillow": version_paquete("pillow"),
+            "pyyaml": version_paquete("PyYAML"),
+        },
+    }
+
+
+def resolver_carpeta_labels(carpeta_imagenes, clase_ruta=Path):
+    """
+    Deriva la carpeta de labels a partir de la de imagenes, reemplazando el
+    ultimo segmento 'images' de la ruta por 'labels' (convencion images/<split>
+    <-> labels/<split> del contrato de datos).
+
+    Issue #15 (punto 2): la version anterior comparaba contra
+    `os.sep + "images" + os.sep`, lo que fallaba en Windows si dataset.yaml
+    traia 'images/val' con '/' literal -- os.path.join solo inserta el
+    separador nativo ENTRE carpeta_base y ese segundo argumento, no reescribe
+    los '/' que ya trae el string, asi que en Windows el path quedaba con
+    separadores mezclados ('...\\mini_dataset\\images/val') y la comparacion
+    contra '\\images\\' nunca matcheaba. El fallo era silencioso: como
+    leer_gt_yolo() devuelve lista vacia cuando el .txt no existe (por diseno,
+    para imagenes sin caja), la evaluacion corria "bien" pero contra cero
+    ground truth reales.
+
+    `clase_ruta` (default pathlib.Path, nativa del SO) es inyectable para
+    poder probar el caso Windows desde cualquier SO con
+    pathlib.PureWindowsPath -- ver tests/test_evaluate_paths.py.
+    """
+    partes = list(clase_ruta(carpeta_imagenes).parts)
+    indices = [i for i, p in enumerate(partes) if p == "images"]
+    if not indices:
+        raise ValueError(
+            f"no se encontro el segmento 'images' en la ruta de imagenes "
+            f"'{carpeta_imagenes}' -- no se puede derivar la carpeta de labels "
+            "por la convencion images/<split> <-> labels/<split>."
+        )
+    partes[indices[-1]] = "labels"
+    return str(clase_ruta(*partes))
+
+
+def calcular_predicciones_y_errores(modelo, carpeta_imagenes, carpeta_labels, nombres, conf, iou_umbral, device):
     from PIL import Image
 
-    nombres = sorted(
-        n for n in os.listdir(carpeta_imagenes) if n.lower().endswith((".jpg", ".jpeg", ".png"))
-    )
     predicciones = []
     ejemplos = []
+    total_ground_truths = 0
 
     for nombre in nombres:
         ruta_img = os.path.join(carpeta_imagenes, nombre)
@@ -142,6 +223,7 @@ def calcular_predicciones_y_errores(modelo, carpeta_imagenes, carpeta_labels, co
         predicciones.append({"source_asset_id": base, "imagen": nombre, "predicciones": cajas_pred})
 
         cajas_gt = [yolo_a_xyxy(c, img_w, img_h) for c in leer_gt_yolo(ruta_label)]
+        total_ground_truths += len(cajas_gt)
         gt_cubierto = [False] * len(cajas_gt)
         pred_usada = [False] * len(cajas_pred)
 
@@ -184,7 +266,7 @@ def calcular_predicciones_y_errores(modelo, carpeta_imagenes, carpeta_labels, co
                     "hipotesis": "prediccion sin ground truth que la cubra con IoU suficiente",
                 })
 
-    return predicciones, ejemplos
+    return predicciones, ejemplos, total_ground_truths
 
 
 def seleccionar_ejemplos(ejemplos, n_por_categoria_grupo=15):
@@ -246,6 +328,31 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Resolver imagenes/labels del split ANTES de correr nada -- si el
+    # dataset.yaml no tiene el split, o la carpeta de labels no se puede
+    # derivar, o no hay ninguna imagen, fallamos ruidosamente aca en vez de
+    # dejar que sea modelo.val() quien lo descubra a medias (issue #15).
+    ds = cargar_dataset_yaml(args.data)
+    carpeta_base = ds.get("path", os.path.dirname(os.path.abspath(args.data)))
+    carpeta_imagenes = os.path.join(carpeta_base, ds[args.split])
+    try:
+        carpeta_labels = resolver_carpeta_labels(carpeta_imagenes)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isdir(carpeta_imagenes):
+        print(f"ERROR: no existe la carpeta de imagenes {carpeta_imagenes} (split '{args.split}')", file=sys.stderr)
+        sys.exit(1)
+
+    nombres_imagenes = sorted(
+        n for n in os.listdir(carpeta_imagenes) if n.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
+    n_imagenes = len(nombres_imagenes)
+    if n_imagenes == 0:
+        print(f"ERROR: no se encontraron imagenes en {carpeta_imagenes}", file=sys.stderr)
+        sys.exit(1)
+
     from ultralytics import YOLO
 
     modelo = YOLO(args.model)
@@ -266,12 +373,26 @@ def main():
         verbose=False,
     )
 
+    predicciones, ejemplos, n_ground_truths = calcular_predicciones_y_errores(
+        modelo, carpeta_imagenes, carpeta_labels, nombres_imagenes, args.conf, args.iou_umbral, args.device
+    )
+    if n_ground_truths == 0:
+        print(
+            f"ERROR: no se encontro ningun ground truth real en {carpeta_labels} para el split "
+            f"'{args.split}' ({n_imagenes} imagenes). Una evaluacion sin ground truth real no es "
+            "valida (contrato, seccion 6 -- analisis de errores) -- revisa que dataset.yaml y la "
+            "carpeta de labels correspondan al split evaluado.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     f1 = float(resultado.box.f1.mean()) if len(resultado.box.f1) else 0.0
     metricas = {
         "split": args.split,
         "conf_umbral": args.conf,
         "iou_umbral": args.iou_umbral,
-        "n_imagenes": int(resultado.box.nc) if hasattr(resultado.box, "nc") else None,
+        "n_imagenes": n_imagenes,
+        "n_ground_truths": n_ground_truths,
         "metricas": {
             "map50": float(resultado.box.map50),
             "map50_95": float(resultado.box.map),
@@ -282,6 +403,14 @@ def main():
         },
         "formulas": FORMULAS,
         "nota_sku": "No hay metricas por SKU: SKU es metadato, no clase (unica clase 'product').",
+        "determinismo": (
+            "El contrato (seccion 5) exige que dos evaluaciones del mismo peso y split "
+            "produzcan metricas identicas -- eso es lo unico que este CLI garantiza y lo "
+            "unico que verifica tests/test_train_evaluate_cli.py (metricas y hash del peso). "
+            "No se declara determinismo byte a byte de predictions.json/error_examples.csv "
+            "entre corridas en hardware distinto."
+        ),
+        "entorno": registrar_entorno(args.device),
     }
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
         json.dump(metricas, f, indent=2, ensure_ascii=False)
@@ -289,15 +418,6 @@ def main():
     manifest = construir_weight_manifest(args.model)
     with open(os.path.join(args.output_dir, "weight_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
-
-    ds = cargar_dataset_yaml(args.data)
-    carpeta_base = ds.get("path", os.path.dirname(os.path.abspath(args.data)))
-    carpeta_imagenes = os.path.join(carpeta_base, ds[args.split])
-    carpeta_labels = carpeta_imagenes.replace(os.sep + "images" + os.sep, os.sep + "labels" + os.sep)
-
-    predicciones, ejemplos = calcular_predicciones_y_errores(
-        modelo, carpeta_imagenes, carpeta_labels, args.conf, args.iou_umbral, args.device
-    )
 
     carpeta_pred = os.path.join(args.output_dir, "predictions")
     os.makedirs(carpeta_pred, exist_ok=True)
@@ -322,6 +442,7 @@ def main():
     print(f"    mAP@0.5={metricas['metricas']['map50']:.4f}  mAP@0.5:0.95={metricas['metricas']['map50_95']:.4f}  "
           f"P={metricas['metricas']['precision']:.4f}  R={metricas['metricas']['recall']:.4f}  F1={f1:.4f}")
     print(f"    metrics.json, weight_manifest.json, predictions/, error_examples.csv en {args.output_dir}")
+    print(f"    imagenes evaluadas: {n_imagenes}  ground truths reales: {n_ground_truths}")
     print(f"    aciertos seleccionados: {len(correctos)}  errores seleccionados: {len(incorrectos)}")
 
 
