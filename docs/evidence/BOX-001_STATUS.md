@@ -148,3 +148,26 @@ Además del comentario detallado, se envió "Submit review" con Approve
 en la pestaña Files changed del PR #11 (16/08, ~23:55). Queda registrado
 formalmente en el sistema de GitHub como aprobación de @andrespoiche,
 no solo como comentario de texto.
+
+## Correcciones tras revisión de Monserrat (PR #18) — AMBOS HALLAZGOS RESUELTOS
+Monserrat (revisión REQUEST_CHANGES) encontró 2 hallazgos reales:
+
+1. audit_image no integraba make_mask_from_rgb (solo usaba alpha,
+   hardcodeado). Relevante porque las imágenes reales de SCR-001 son
+   RGB con fondo uniforme, sin alpha real -> audit_image no podía
+   procesar el dataset real tal como estaba.
+   FIX (commit 8e1746a): fallback automático a make_mask_from_rgb
+   cuando alpha falla por estar completamente opaco. mask_method se
+   registra correctamente. Nuevo test con imagen RGB de fondo uniforme.
+
+2. Escritura del label .txt no era atómica (usaba open() directo),
+   pese a que este mismo .md afirmaba lo contrario ("tanto en labels
+   como en CSV"). Esa afirmación era incorrecta y quedó corregida con
+   el fix real.
+   FIX (commit 1955640): mismo patrón tmp+os.replace+fsync que ya usa
+   el CSV, con limpieza ante fallo. Nuevo test simula fallo real
+   (mock de os.replace) y confirma que no queda archivo parcial.
+
+19/19 tests en verde tras ambas correcciones. Script de muestra
+reproducible sigue funcionando sin cambios de comportamiento.
+Pendiente: esperar nueva revisión de Monserrat sobre PR #18.
