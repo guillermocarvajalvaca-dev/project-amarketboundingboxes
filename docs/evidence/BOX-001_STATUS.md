@@ -142,3 +142,9 @@ Nota: el PR sigue con "Changes requested" de la revisión de coordinación
 anterior de Guillermo — pendiente que él la actualice/dismissee para
 destrabar el merge. Mi aprobación cubre específicamente los 9 puntos
 de revisión independiente que él me asignó.
+
+## SCR-001 — Aprobación formal registrada en GitHub
+Además del comentario detallado, se envió "Submit review" con Approve
+en la pestaña Files changed del PR #11 (16/08, ~23:55). Queda registrado
+formalmente en el sistema de GitHub como aprobación de @andrespoiche,
+no solo como comentario de texto.
