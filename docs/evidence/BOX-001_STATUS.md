@@ -102,3 +102,17 @@ pytest tests/test_make_boxes.py tests/test_box_audit.py -v
 # Siguiente paso: abrir PR de BOX-001 (reviewer: Monserrat) usando la
 # plantilla del repo (Identidad, Contrato, Ejecución, Checklist, etc.)
 ```
+
+## PR ABIERTO — BOX-001 formalmente entregado
+PR #18: "[BOX-001] Bounding boxes, gate de huérfanos y auditoría (T01-T10 completo)"
+https://github.com/guillermocarvajalvaca-dev/project-amarketboundingboxes/pull/18
+
+- Rama: feat/andres/BOX-001-make-boxes -> main
+- 7 commits, 8 files changed
+- Reviewer: Monserrat Barba (@mbarbacardozo)
+- Closes #5
+- Estado: Awaiting approval (16/08, ~21:05)
+
+BOX-001 queda formalmente entregado. Próximo trabajo: trasladar
+make_splits.py + configs/dataset.yaml a feat/andres/SPL-001-make-splits
+(issue #14), cuando retome sesión.
