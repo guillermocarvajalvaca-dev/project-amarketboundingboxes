@@ -116,3 +116,29 @@ https://github.com/guillermocarvajalvaca-dev/project-amarketboundingboxes/pull/1
 BOX-001 queda formalmente entregado. Próximo trabajo: trasladar
 make_splits.py + configs/dataset.yaml a feat/andres/SPL-001-make-splits
 (issue #14), cuando retome sesión.
+
+## SCR-001 — Revisión independiente COMPLETADA
+Revisión publicada como comentario en PR #11 (16/08, ~23:35).
+Los 9 puntos del checklist de Guillermo pasaron:
+1. Suite 15/15 ✅
+2. rights_status = REDISTRIBUTION_PROHIBITED ✅
+3. CLI --output-dir/--manifest ✅
+4. Escritura atómica (tempfile + os.replace + limpieza) ✅
+5. Smoke test 3/3 ✅
+6. Idempotencia (accepted_this_run=0 en 2da corrida) ✅
+7. SHA-256 manifest idéntico entre mis 2 corridas (ec114901...) —
+   difiere del hash de Monserrat (11fb5036...), esperado por catálogo vivo
+8. Inspección visual 3 imágenes: fondo uniforme, aisladas, sin datos
+   personales. Nota menor: SKU 0610985012303 es pack de 2 unidades
+9. git diff --check limpio, sin modificaciones no declaradas
+
+Decisión: APPROVE
+
+Hallazgos de infraestructura reportados (no bloqueantes para este PR):
+- conftest.py no versionado en ninguna rama, incluida main
+- requirements.txt vive en chore/env-001, sin mergear a main
+
+Nota: el PR sigue con "Changes requested" de la revisión de coordinación
+anterior de Guillermo — pendiente que él la actualice/dismissee para
+destrabar el merge. Mi aprobación cubre específicamente los 9 puntos
+de revisión independiente que él me asignó.
