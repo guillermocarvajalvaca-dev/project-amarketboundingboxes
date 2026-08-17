@@ -86,7 +86,7 @@ def make_mask_from_alpha(rgba: np.ndarray, alpha_threshold: float) -> np.ndarray
 
     alpha = rgba[:, :, 3].astype(float)
 
-    if np.all(alpha == 255) or np.all(alpha == alpha.max()):
+    if np.all(alpha == 255):
         raise ValueError(
             "Canal alpha completamente opaco: no demuestra fondo transparente real, "
             "usar make_mask_from_rgb en su lugar."
@@ -293,6 +293,9 @@ def audit_image(
         row["image_height_px"] = h
 
         mask = make_mask_from_alpha(rgba, alpha_threshold)
+
+        if not mask.any():
+            raise ValueError("Máscara vacía: no hay píxeles de foreground (rechazo, sin label).")
 
         ys, xs = mask.nonzero()
         x_min, x_max = int(xs.min()), int(xs.max())
