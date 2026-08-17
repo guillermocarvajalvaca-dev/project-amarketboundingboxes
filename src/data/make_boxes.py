@@ -244,6 +244,9 @@ def audit_image(
     alpha_threshold: float,
     algorithm_version: str,
     class_id: int = 0,
+    background_uniformity_tolerance: float = None,
+    foreground_delta: float = None,
+    min_foreground_pixels: int = None,
 ) -> dict:
     """Procesa una imagen y devuelve una fila de auditoría (§7 contrato):
     29 columnas exactas. Un rechazo conserva fila y no crea .txt.
@@ -291,8 +294,22 @@ def audit_image(
         h, w = rgba.shape[0], rgba.shape[1]
         row["image_width_px"] = w
         row["image_height_px"] = h
-
-        mask = make_mask_from_alpha(rgba, alpha_threshold)
+        mask_method = "alpha"
+        try:
+            mask = make_mask_from_alpha(rgba, alpha_threshold)
+        except ValueError:
+            if (background_uniformity_tolerance is None
+                    or foreground_delta is None
+                    or min_foreground_pixels is None):
+                raise
+            rgb = rgba[:, :, :3]
+            mask = make_mask_from_rgb(
+                rgb,
+                background_uniformity_tolerance=background_uniformity_tolerance,
+                foreground_delta=foreground_delta,
+                min_foreground_pixels=min_foreground_pixels,
+            )
+            mask_method = "rgb"
 
         if not mask.any():
             raise ValueError("Máscara vacía: no hay píxeles de foreground (rechazo, sin label).")
@@ -333,6 +350,7 @@ def audit_image(
             "box_width_px": box_width_px, "box_height_px": box_height_px,
             "x_center": float(x_center), "y_center": float(y_center),
             "width": float(width), "height": float(height),
+            "mask_method": mask_method,
             "status": "accepted",
             "rejection_reason": "",
         })

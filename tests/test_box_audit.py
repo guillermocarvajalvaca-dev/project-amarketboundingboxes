@@ -162,3 +162,42 @@ def test_audit_image_label_atomico_sin_fallo_contenido_correcto(tmp_path):
     assert len(files) == 1
     assert files[0].name == "A007.txt"
     assert row["label_path"] == str(files[0])
+
+
+def make_rgb_image_uniform_bg(path, w=64, h=64, fg_box=(15, 15, 45, 45),
+                               bg_color=(255, 255, 255), fg_color=(80, 40, 20)):
+    """Imagen RGB (sin canal alpha) con fondo uniforme y un rectángulo de
+    color distinto como foreground. Simula el caso real del piloto de
+    SCR-001 (imágenes JPG/RGB de Amarket, fondo blanco uniforme)."""
+    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    arr[:, :] = bg_color
+    x0, y0, x1, y1 = fg_box
+    arr[y0:y1, x0:x1] = fg_color
+    Image.fromarray(arr, mode="RGB").save(path)
+
+
+def test_audit_image_rgb_fondo_uniforme_usa_make_mask_from_rgb(tmp_path):
+    """Hallazgo Monserrat #2: audit_image debe soportar el camino RGB con
+    fondo uniforme (§4 contrato), no solo RGBA con alpha real. Las
+    imágenes reales del piloto SCR-001 son RGB con fondo uniforme."""
+    img_path = tmp_path / "A008.png"
+    make_rgb_image_uniform_bg(str(img_path))
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+
+    row = audit_image(
+        image_path=str(img_path),
+        source_asset_id="A008",
+        sku_id="SKU008",
+        labels_dir=str(labels_dir),
+        alpha_threshold=127,
+        algorithm_version="v1",
+        background_uniformity_tolerance=5.0,
+        foreground_delta=30.0,
+        min_foreground_pixels=10,
+    )
+
+    assert row["status"] == "accepted"
+    assert row["mask_method"] == "rgb"
+    assert row["label_path"] != ""
+    assert os.path.exists(row["label_path"])
