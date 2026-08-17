@@ -106,3 +106,26 @@ Monserrat publique el nuevo commit con los 15 tests corriendo:
   (clonar/pull su rama, correr los 15 tests, confirmar mismo resultado)
 - Esto es requisito explícito antes de aprobar y mergear su PR
 - Aún no ocurrió — solo Guillermo le pidió el fix a ella, esperando su commit
+
+## Tarea asignada — Revisión independiente de SCR-001 (PENDIENTE, no iniciada)
+Guillermo (16/08, 19:48) asignó revisión independiente sobre PR #11, commit
+exacto: d63f152c6c9a3578533c5bf54ec8861c7537baeb
+
+Checklist a verificar:
+1. Suite completa: 15/15 tests
+2. rights_status = REDISTRIBUTION_PROHIBITED (fix de Monserrat ya aplicado)
+3. CLI con --output-dir y --manifest
+4. Escritura atómica y limpieza ante fallo
+5. Smoke test de 3 productos
+6. Segunda ejecución idempotente
+7. SHA-256 del manifest sin cambios
+8. Inspección visual de las 3 imágenes
+9. git diff --check + ausencia de modificaciones locales no declaradas
+
+Restricción: NO ejecutar crawl completo, solo smoke test contractual.
+Entregable: registrar en el PR #11 comando reproducido, resultados,
+diferencias, y decisión APPROVE / REQUEST_CHANGES.
+
+Equipo pausó por hoy (Guillermo cansado, Monserrat viajando a Santa Cruz);
+retoman mañana en horario de clases, foco fuerte el martes. Yo sigo
+avanzando BOX-001 mientras tanto, según lo acordado.
