@@ -1,7 +1,7 @@
 """
 Tests para audit_image en src/data/make_boxes.py
 Según docs/governance/02_CONTRACTS/BOUNDING_BOX_ALGORITHM_CONTRACT.md §7
-(Auditoría mínima) — 29 columnas exactas, un rechazo conserva fila sin .txt
+(Auditoría mínima) — 30 columnas exactas (29 del contrato original §7 + mask_method, agregado para soportar el fallback RGB/alpha), un rechazo conserva fila sin .txt
 """
 import os
 import numpy as np
@@ -36,7 +36,7 @@ def make_empty_rgba_image(path, w=10, h=10):
     Image.fromarray(arr, mode="RGBA").save(path)
 
 
-def test_audit_image_aceptada_tiene_las_29_columnas(tmp_path):
+def test_audit_image_aceptada_tiene_las_30_columnas(tmp_path):
     img_path = tmp_path / "A001.png"
     make_rgba_image(str(img_path))
     labels_dir = tmp_path / "labels"
