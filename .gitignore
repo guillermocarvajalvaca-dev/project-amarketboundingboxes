@@ -17,6 +17,10 @@ data/raw/
 data/processed/
 data/labels/
 
+# Fixture de tests (TRN-001): se regenera con tests/generate_fixture.py,
+# contiene un path absoluto propio de cada maquina -- no se versiona.
+tests/fixtures/
+
 # Salidas generadas
 outputs/*
 !outputs/.gitkeep
@@ -26,6 +30,16 @@ outputs/*
 *.pth
 *.onnx
 *.engine
+
+# Artefactos de compilacion LaTeX (el PDF se genera, no se versiona)
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+informe/*.pdf
 
 # Sistema operativo
 .DS_Store

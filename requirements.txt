@@ -1,0 +1,25 @@
+# Project AmarketBoundingBoxes — entorno reproducible (ENV-001)
+#
+# Python fijado: 3.11.9
+# Fecha de resolucion: 2026-08-16
+# Verificado en venv limpio (Windows 11, pip 24.0): las cuatro importan y
+# "from ultralytics import YOLO" funciona.
+#
+# Recreacion:
+#   py -3.11 -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   python -m pip install -r requirements.txt
+#
+# Solo dependencias DIRECTAS. Las transitivas (torch, torchvision, opencv,
+# matplotlib, scipy, pandas y demas) las resuelve pip a partir de estos pines.
+# No se vuelca pip freeze entero: eso congelaria arboles de dependencias que
+# nadie declaro y haria ilegible el cambio real.
+#
+# Nota: ultralytics arrastra torch. En Windows, el wheel por defecto de PyPI es
+# la build CPU (torch 2.13.0+cpu), que es la que exige la guia para inferencia.
+# Ver docs/ENVIRONMENT.md.
+
+pillow==12.3.0
+numpy==2.4.6
+ultralytics==8.4.120
+PyYAML==6.0.3
