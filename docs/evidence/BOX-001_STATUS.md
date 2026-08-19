@@ -290,3 +290,33 @@ actualizado). Alcance SOLO documental:
   overall_G3_status = PARTIAL (NO declarar G3 completo)
 - NO modificar código, tests, configs, ni documentos FROZEN
 Reviewer: Monserrat. Estado: NO INICIADO — próximo paso al retomar.
+
+## PR #23 — Revisión de Guillermo (code owner), 7 puntos pendientes
+Tras la aprobación de Monserrat, Guillermo (code owner) dejó
+REQUEST_CHANGES con 7 puntos adicionales sobre gobernanza/estructura
+(no lógica de negocio). Progreso:
+
+### ✅ Punto 4 — Ampliar verify_no_leakage con source_asset_id
+scripts/generate_splits_sample.py: agregado source_asset_id_cross_split_violations
+al JSON de evidencia, incluido en cero_leakage. Nuevo test aislado
+(mismo source_asset_id, sku_id Y duplicate_group_id ambos distintos).
+
+### ✅ Punto 5 — Validaciones contractuales
+src/data/make_splits.py: nuevas funciones _validate_manifest_contract
+y _validate_ratios, llamadas al inicio de make_splits:
+- columnas obligatorias (sku_id, source_asset_id, duplicate_group_id)
+- sin nulos en identificadores de grupo
+- class_id == 0 si la columna está presente (no se exige como
+  obligatoria para no romper manifiestos existentes sin esa columna)
+- ratios: exactamente 3, numéricos, no negativos, suman 1.0
+- 7 tests nuevos, cada uno verificando un error claro y específico
+
+18/18 tests en verde. Script de muestra sigue funcionando igual
+(25/6/5, cero leakage en las 3 dimensiones).
+
+### ⏳ Pendientes
+1. Reviewers/estado del PR (Closes→Refs, declarar status explícito)
+2. Mover CSV sintético a data/sample/splits_synthetic.csv
+3. Separar evidencia: crear SPL-001_STATUS.md propio, no tocar BOX-001_STATUS.md
+6. Pandas como dependencia — depende de ENV-002 (issue #25), no es acción mía
+7. Re-ejecutar checklist completo al final
