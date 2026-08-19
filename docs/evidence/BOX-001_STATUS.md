@@ -216,3 +216,27 @@ Pendiente en SPL-001:
 - Abrir PR independiente, reviewer Monserrat
 - CUANDO llegue el dataset real: re-ejecutar split final sobre datos
   reales (bloqueado hasta entonces por diseño)
+
+## SPL-001 — Alcance técnico completo (commit 450681c)
+Los 4 requisitos del issue #14 están cubiertos con datos sintéticos:
+- src/data/make_splits.py: ✅ (union-find, class_rule, gate)
+- data/manifests/splits.csv: ✅ (generado con scripts/generate_splits_sample.py,
+  seed=42, ratios reales O-002, 36 filas sintéticas, split 25/6/5)
+- configs/dataset.yaml: ✅ (split_policy con valores reales O-002;
+  algorithm/quality_rules/publication siguen con PENDING_* explícitos
+  donde corresponde: PENDING_G3_PILOT, PENDING_O_001, PENDING_O_007)
+- Evidencia de leakage y reproducibilidad: ✅
+  (outputs/splits_leakage_evidence.json, no versionado por gitignore,
+  cero violaciones sku_id/duplicate_group_id, 2 corridas idénticas)
+
+27/27 tests en verde (13+6 de BOX-001 + 8 de SPL-001).
+
+PENDIENTE antes de abrir PR de SPL-001:
+- Confirmar que no hace falta nada más del checklist de Guillermo
+  (comparar contra BOX-001: escritura atómica ya cubierta en
+  generate_splits_sample.py con tmp+os.replace)
+- Abrir PR independiente, reviewer Monserrat, plantilla oficial
+
+BLOQUEADO hasta que se resuelva O-001 y Monserrat ejecute el crawl
+completo: re-ejecutar split FINAL sobre dataset real (no sintético).
+Esto es esperado por diseño, no es un pendiente de acción mía.
