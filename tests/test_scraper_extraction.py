@@ -20,6 +20,8 @@ from src.scraper_extraction import (
     reconcile_outputs,
     request_with_retries,
     save_image_idempotently,
+    source_asset_id,
+    source_asset_identity_key,
     validate_image_bytes,
     validate_image_content_type,
 )
@@ -438,6 +440,70 @@ class TestScraperExtraction(unittest.TestCase):
             validate_image_bytes(
                 corrupt_bytes
             )
+
+    def test_historical_manifest_identity_ignores_shopify_version_query(self):
+        """Manifest histórico y URL Shopify nueva conservan identidad lógica."""
+
+        sha256 = calculate_sha256(
+            b"misma-imagen-binaria"
+        )
+
+        historical_key = source_asset_identity_key(
+            "AMARKET",
+            "https://amarket.com.bo/products/producto",
+            (
+                "https://amarket.com.bo/cdn/shop/files/"
+                "producto.jpg?v=1786860434"
+            ),
+            sha256,
+        )
+
+        current_key = source_asset_identity_key(
+            "AMARKET",
+            "https://amarket.com.bo/products/producto",
+            (
+                "https://amarket.com.bo/cdn/shop/files/"
+                "producto.jpg?v=1787033279"
+            ),
+            sha256,
+        )
+
+        self.assertEqual(
+            historical_key,
+            current_key,
+        )
+
+    def test_source_asset_id_ignores_shopify_version_query(self):
+        """Misma imagen Shopify con distinto ?v= conserva identidad."""
+
+        sha256 = calculate_sha256(
+            b"misma-imagen-binaria"
+        )
+
+        first_id = source_asset_id(
+            "AMARKET",
+            "https://amarket.com.bo/products/producto",
+            (
+                "https://amarket.com.bo/cdn/shop/files/"
+                "producto.jpg?v=1786860434"
+            ),
+            sha256,
+        )
+
+        second_id = source_asset_id(
+            "AMARKET",
+            "https://amarket.com.bo/products/producto",
+            (
+                "https://amarket.com.bo/cdn/shop/files/"
+                "producto.jpg?v=1787033279"
+            ),
+            sha256,
+        )
+
+        self.assertEqual(
+            first_id,
+            second_id,
+        )
 
     def test_s07_same_bytes_are_idempotent(self):
         """S07: mismos bytes no crean otra versión."""

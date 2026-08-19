@@ -661,6 +661,36 @@ def duplicate_group_id(image_bytes):
     return calculate_sha256(image_bytes)
 
 
+def source_asset_identity_key(
+    source_name,
+    product_page_url,
+    image_url,
+    sha256,
+):
+    """Identidad estable ignorando query/fragment temporales de la imagen."""
+
+    parsed_image = urlsplit(image_url)
+
+    canonical_image_url = urlunsplit(
+        (
+            parsed_image.scheme.lower(),
+            parsed_image.netloc.lower(),
+            parsed_image.path,
+            "",
+            "",
+        )
+    )
+
+    return "|".join(
+        (
+            source_name,
+            canonicalize_product_url(product_page_url),
+            canonical_image_url,
+            sha256,
+        )
+    )
+
+
 def source_asset_id(
     source_name,
     product_page_url,
@@ -669,15 +699,11 @@ def source_asset_id(
 ):
     """Genera identificador trazable del asset."""
 
-    canonical_string = "|".join(
-        (
-            source_name,
-            canonicalize_product_url(
-                product_page_url
-            ),
-            image_url,
-            sha256,
-        )
+    canonical_string = source_asset_identity_key(
+        source_name,
+        product_page_url,
+        image_url,
+        sha256,
     )
 
     return calculate_sha256(
@@ -1400,6 +1426,17 @@ def run_smoke_test(
         )
     }
 
+    manifest_by_identity = {
+        source_asset_identity_key(
+            row.get("source_name", ""),
+            row.get("product_page_url", ""),
+            row.get("image_url", ""),
+            row.get("sha256", ""),
+        ): row
+        for row in previous_manifest
+        if row.get("sha256")
+    }
+
     rejection_rows = list(
         previous_rejections
     )
@@ -1607,10 +1644,23 @@ def run_smoke_test(
                 ],
             }
 
-            if asset_id not in manifest_by_id:
+            identity_key = source_asset_identity_key(
+                source_name,
+                metadata["product_page_url"],
+                image_url,
+                sha256,
+            )
+
+            if (
+                asset_id not in manifest_by_id
+                and identity_key not in manifest_by_identity
+            ):
                 accepted_this_run += 1
                 manifest_by_id[
                     asset_id
+                ] = row
+                manifest_by_identity[
+                    identity_key
                 ] = row
 
             print(
