@@ -147,3 +147,16 @@ y _validate_ratios, llamadas al inicio de make_splits:
 3. ✅ COMPLETO — Separar evidencia: creado SPL-001_STATUS.md propio; BOX-001_STATUS.md revertido a la version de main (sin contenido de SPL-001)
 6. Pandas como dependencia — depende de ENV-002 (issue #25), no es acción mía
 7. Re-ejecutar checklist completo al final
+
+## ✅ Punto 1 completo — Reviewers y estado del PR
+Descripción del PR #23 actualizada:
+- Reviewer SPL-001: @guillermocarvajalvaca-dev
+- Reviewer CFG-001: @pablolinares1801
+- Monserrat queda como revisora independiente adicional
+- Issue: Closes #14 -> Refs #14 (issue permanece abierto)
+- Declarado explícitamente: implementation_status=PASSED_ON_SYNTHETIC_FIXTURE,
+  real_dataset_execution=NOT_RUN, overall_G3_status=PARTIAL
+
+Puntos 1-5 completos. Punto 6 (pandas como dependencia) depende de
+ENV-002 (issue #25), no es acción propia. Falta punto 7: re-ejecutar
+checklist completo y publicar evidencia final en el PR.
