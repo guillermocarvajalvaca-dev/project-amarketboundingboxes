@@ -171,3 +171,10 @@ Monserrat (revisión REQUEST_CHANGES) encontró 2 hallazgos reales:
 19/19 tests en verde tras ambas correcciones. Script de muestra
 reproducible sigue funcionando sin cambios de comportamiento.
 Pendiente: esperar nueva revisión de Monserrat sobre PR #18.
+
+## Issue #24 (BOX-EV-001) — PR abierto
+Evidencia de BOX-001 registrada en el ledger vivo (ADR-003):
+- docs/evidence/2026-08-19_BOX-001_implementation_validation.md
+- Fila EV-G3-BOX-001 en docs/evidence/EVIDENCE_LEDGER.csv
+- Alcance estrictamente documental, sin tocar código/tests/FROZEN
+- Reviewer: Monserrat. Estado: Awaiting approval.
