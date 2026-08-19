@@ -1,2 +1,1 @@
 product_page_url,image_url,retrieved_at,retrieval_run_id,rejection_reason
-https://amarket.com.bo/collections/lo-nuevo/products/7509552961812,,2026-08-19T14:26:49.521777+00:00,82ffe26b-c495-413a-930c-8b33103ddef3,TimeoutError: The read operation timed out
