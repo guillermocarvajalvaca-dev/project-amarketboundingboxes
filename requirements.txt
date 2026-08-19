@@ -1,17 +1,18 @@
-# Project AmarketBoundingBoxes — entorno reproducible (ENV-001)
+# Project AmarketBoundingBoxes — entorno reproducible (ENV-001, ENV-002)
 #
 # Python fijado: 3.11.9
-# Fecha de resolucion: 2026-08-16
-# Verificado en venv limpio (Windows 11, pip 24.0): las cuatro importan y
-# "from ultralytics import YOLO" funciona.
+# Fecha de resolucion: 2026-08-16 (ENV-001); 2026-08-19 (ENV-002, pandas y pytest)
+# ENV-001 verificado en venv limpio (Windows 11, pip 24.0): las cuatro directas de
+# entonces importan y "from ultralytics import YOLO" funciona. ENV-002 anade
+# pandas==3.0.5 y pytest==9.1.1 sobre ese mismo .venv 3.11.9; ver docs/ENVIRONMENT.md.
 #
 # Recreacion:
 #   py -3.11 -m venv .venv
 #   .venv\Scripts\Activate.ps1
 #   python -m pip install -r requirements.txt
 #
-# Solo dependencias DIRECTAS. Las transitivas (torch, torchvision, opencv,
-# matplotlib, scipy, pandas y demas) las resuelve pip a partir de estos pines.
+# Solo dependencias DIRECTAS: seis. Las transitivas (torch, torchvision, opencv,
+# matplotlib, scipy, tzdata, pluggy y demas) las resuelve pip a partir de estos pines.
 # No se vuelca pip freeze entero: eso congelaria arboles de dependencias que
 # nadie declaro y haria ilegible el cambio real.
 #
@@ -23,3 +24,5 @@ pillow==12.3.0
 numpy==2.4.6
 ultralytics==8.4.120
 PyYAML==6.0.3
+pandas==3.0.5
+pytest==9.1.1
