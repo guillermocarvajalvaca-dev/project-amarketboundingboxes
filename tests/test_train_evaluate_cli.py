@@ -32,7 +32,17 @@ PYTHON = sys.executable
 
 
 def correr(comando, cwd=RAIZ):
-    return subprocess.run(comando, cwd=cwd, capture_output=True, text=True)
+    # encoding/errors explicitos (issue #13): en Windows (cp1252 por default)
+    # la salida de ultralytics trae bytes que el codec de la consola no
+    # decodifica, y subprocess.run con text=True sin encoding declarado
+    # lanza UnicodeDecodeError en los hilos lectores -- se pierde stdout/
+    # stderr justo cuando son la evidencia del entrenamiento real (G2+).
+    # UTF-8 explicito + errors="replace" evita el crash y preserva el resto
+    # de la salida en vez de perderla silenciosamente.
+    return subprocess.run(
+        comando, cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
 
 
 class TestInterfazCLI(unittest.TestCase):
