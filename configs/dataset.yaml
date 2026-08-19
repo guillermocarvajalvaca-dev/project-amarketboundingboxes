@@ -47,12 +47,12 @@ quality_rules:
   rejected_items_have_reason: MUST_PASS
   background_mode_acceptable: MUST_PASS
   bbox_tests_T01_T10: MUST_PASS
-  # PENDING_O_001: depende del crawl completo de SCR-001, aún bloqueado
-  final_dataset_size: PENDING_O_001
+  # O-001 resuelto como politica (LD-001); numero real pendiente del crawl
+  final_dataset_size: UNKNOWN_PENDING_CRAWL_COMPLETION  # Decision LD-001 cierra O-001 como politica (todos los activos unicos ACCEPTED); conteo real pendiente del crawl completo
 
 publication:
   external_location: GOOGLE_DRIVE_PROJECT_FOLDER
-  redistribution: PENDING_O_007
+  redistribution: REDISTRIBUTION_PROHIBITED  # Decision LD-003, cierra O-007 (16/08/2026)
 
 manifest:
   required_fields:

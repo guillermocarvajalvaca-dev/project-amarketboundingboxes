@@ -14,7 +14,7 @@ SPLIT_NAMES = ("train", "val", "test")
 
 
 def _build_groups(manifest: pd.DataFrame):
-    """Une sku_id y duplicate_group_id en componentes conexos.
+    """Une sku_id, source_asset_id y duplicate_group_id en componentes conexos (group_exclusivity, contrato).
 
     Si dos filas comparten sku_id, o comparten duplicate_group_id,
     o (transitivamente) quedan conectadas por otras filas, todas
@@ -37,7 +37,9 @@ def _build_groups(manifest: pd.DataFrame):
     for _, row in manifest.iterrows():
         sku_node = ("sku", row["sku_id"])
         dup_node = ("dup", row["duplicate_group_id"])
+        asset_node = ("asset", row["source_asset_id"])
         union(sku_node, dup_node)
+        union(sku_node, asset_node)
 
     groups = defaultdict(list)
     for idx, row in manifest.iterrows():

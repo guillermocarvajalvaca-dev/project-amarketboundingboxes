@@ -141,3 +141,41 @@ def test_ratios_reales_O_002_reparto_proporcional():
     assert counts["train"] >= counts["val"]
     assert counts["train"] >= counts["test"]
     assert counts["train"] >= 10  # al menos la mitad, dado ratio 0.70
+
+
+def test_group_exclusivity_source_asset_id():
+    """Hallazgo Monserrat (PR #23): verificar explícitamente que un mismo
+    source_asset_id no cruce splits, según group_exclusivity del contrato
+    (sku_id, source_asset_id, duplicate_group_id)."""
+    manifest = sample_manifest()
+    splits = make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+    asset_to_splits = {}
+    for _, row in splits.iterrows():
+        asset_to_splits.setdefault(row["source_asset_id"], set()).add(row["split"])
+
+    for asset, split_set in asset_to_splits.items():
+        assert len(split_set) == 1, f"source_asset_id {asset} cruza splits: {split_set}"
+
+
+def test_group_exclusivity_source_asset_id_independiente_de_sku():
+    """Caso borde: dos source_asset_id distintos con el mismo sku_id pero
+    SIN compartir duplicate_group_id deben seguir en el mismo split
+    (porque comparten sku_id), confirmando que la unión por
+    source_asset_id no rompe la lógica existente de sku_id."""
+    manifest = pd.DataFrame(
+        [
+            ("SKU100", "A100_1", "DUP_X"),
+            ("SKU100", "A100_2", "DUP_Y"),  # mismo sku, distinto dup_group
+            ("SKU200", "A200_1", "DUP_Z"),
+            ("SKU300", "A300_1", "DUP_W"),
+        ],
+        columns=["sku_id", "source_asset_id", "duplicate_group_id"],
+    )
+    splits = make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+    sku100_rows = splits[splits["sku_id"] == "SKU100"]
+    assert sku100_rows["split"].nunique() == 1, (
+        "Filas del mismo sku_id deben quedar en el mismo split, "
+        "incluso con distinto duplicate_group_id"
+    )
