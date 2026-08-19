@@ -1,5 +1,7 @@
 # Este archivo asigna revisores, no autoría.
 # Origen: docs/governance/03_GITHUB/CODEOWNERS_TEMPLATE
+# Ajuste GOV-002 (issue #21): revisión independiente de /informe/, del notebook EVA-002
+# y de los artefactos vivos de gobernanza creados fuera del paquete FROZEN.
 /src/scraper_extraction.py                 @andrespoiche
 /src/data/validate_downloads.py            @andrespoiche
 /configs/data_sources.yaml                 @guillermocarvajalvaca-dev
@@ -10,6 +12,10 @@
 /src/evaluate.py                           @guillermocarvajalvaca-dev
 /src/predict.py                            @Pablolinares1801
 /notebooks/inferencia_cpu.ipynb            @andrespoiche
+/notebooks/analisis_errores.ipynb          @andrespoiche
 /README.md                                 @mbarbacardozo
-/informe/                                  @Pablolinares1801
+/informe/                                  @guillermocarvajalvaca-dev @Pablolinares1801
 /docs/governance/                          @mbarbacardozo
+/docs/decisions/ADR-004_LIVE_DECISION_AND_AUTHORIZATION_REGISTER.md @mbarbacardozo
+/docs/decisions/LIVE_DECISION_REGISTER.md  @mbarbacardozo
+/docs/evidence/CONTRIBUTION_LEDGER.csv     @mbarbacardozo
