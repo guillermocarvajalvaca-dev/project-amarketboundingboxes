@@ -240,3 +240,20 @@ PENDIENTE antes de abrir PR de SPL-001:
 BLOQUEADO hasta que se resuelva O-001 y Monserrat ejecute el crawl
 completo: re-ejecutar split FINAL sobre dataset real (no sintético).
 Esto es esperado por diseño, no es un pendiente de acción mía.
+
+## PR ABIERTO — SPL-001 formalmente entregado
+PR #23: "[SPL-001] Splits reproducibles con exclusividad de grupo (seed=42, ratios O-002)"
+https://github.com/guillermocarvajalvaca-dev/project-amarketboundingboxes/pull/23
+
+- Rama: feat/andres/SPL-001-make-splits -> main
+- 6 commits, 6 files changed
+- Reviewers: Monserrat (@mbarbacardozo, correcta según issue #14) +
+  Pablo y Guillermo (forzados por CODEOWNERS del repo, no se pueden
+  quitar — Guillermo mencionó que GOV-002 corrige CODEOWNERS)
+- Closes #14
+- Estado: Awaiting approval (18/08, ~22:19)
+
+SPL-001 queda formalmente entregado con alcance técnico completo
+(sintéticos). Pendiente: aprobación de Monserrat, y más adelante,
+cuando O-001 se resuelva y Monserrat ejecute el crawl completo,
+re-ejecutar el split final sobre el dataset real.
