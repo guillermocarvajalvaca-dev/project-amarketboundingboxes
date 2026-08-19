@@ -8,8 +8,22 @@
 - Relacionada: `ADR-002_REPO_VISIBILITY_AND_PROTECTION.md`, `ADR-003_LIVE_LEDGERS_OUTSIDE_FROZEN_PACKAGE.md`; issue #21 (GOV-002)
 
 `PROPOSED` en el sentido del §7 del contrato SDD: especificada, sin aprobación. No
-gobierna hasta que el coordinador la acepte expresamente. Esta ADR no puede
-autoaceptarse: quien la redacta no es la autoridad de fase.
+gobierna hasta que el coordinador la acepte expresamente.
+
+Jose Guillermo Carvajal Vaca actúa a la vez como proponente y redactor de esta ADR y como
+coordinador con autoridad para aceptarla. Redactarla, commitearla o abrir el PR no
+constituye por sí solo la aceptación: el paso de `PROPOSED` a `ACCEPTED` exige una
+decisión explícita, fechada y trazable del coordinador.
+
+La revisión independiente de Monserrat Barba, verificadora de GOV-002 en la matriz RACI,
+es un control de calidad obligatorio antes del merge. Su aprobación verifica la
+conformidad con el SDD, el manual operativo y el RACI; no acepta la ADR ni sustituye la
+decisión del coordinador. Recíprocamente, la aceptación del coordinador no reemplaza la
+revisión independiente requerida para fusionar el cambio.
+
+Mientras no exista decisión explícita del coordinador, ADR-004 permanece `PROPOSED`. Aun
+aceptada, no puede fusionarse ni hacerse operativa sin la revisión independiente
+requerida.
 
 ## Contexto
 
