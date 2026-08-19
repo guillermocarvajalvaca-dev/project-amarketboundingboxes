@@ -85,6 +85,41 @@ wheel CUDA correspondiente **por su cuenta y declararlo**, sin modificar
 `requirements.txt`: el entorno declarado es el de CPU, y es el que debe reproducirse para
 evaluar.
 
+## Dispositivo de la ejecución gobernante
+
+Nota añadida por GOV-002 (issue #21). Alcance limitado: fija **en qué dispositivo** corre
+la ejecución que se presenta como resultado del proyecto. **No cambia dependencias ni
+versiones**; `requirements.txt` y los pines de la tabla anterior quedan intactos.
+
+Llamamos *ejecución gobernante* a la que produce los pesos, las métricas y las curvas que
+se entregan como evidencia de gate. Se distingue de la exploración local, que cada
+integrante hace donde quiera y que no cierra ningún gate.
+
+- **La ejecución gobernante se realiza en CPU.** Es la única configuración cubierta por la
+  verificación de este documento y la única que los cuatro integrantes pueden reproducir
+  con el entorno declarado.
+- **Apple MPS no debe utilizarse para la ejecución gobernante de G4.** El backend
+  `torch.device("mps")` no está cubierto por los pines verificados aquí —la verificación
+  del 2026-08-16 se hizo sobre la build `+cpu` en Windows— y el §8 del contrato SDD exige
+  que `evaluate.py`, sobre el mismo peso y el mismo split, produzca métricas idénticas.
+  Una métrica producida en MPS no es reproducible por quien evalúa, de modo que no
+  satisface esa condición y no puede presentarse como evidencia de gate. MPS queda
+  admitido solo para exploración local.
+- CUDA mantiene el tratamiento ya descrito en «PyTorch en CPU»: quien entrene en GPU
+  instala el wheel por su cuenta y lo declara, sin tocar `requirements.txt`.
+- Toda ejecución gobernante **registra el dispositivo efectivo en su log**. Un run cuyo
+  dispositivo no conste en el log no satisface la Definition of Done del manual operativo,
+  con independencia de las métricas que reporte.
+
+Comando para dejar constancia del dispositivo antes de un run gobernante:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.backends.mps.is_available())"
+```
+
+`NOT RUN` en GOV-002: esta nota fija la restricción, no ejecuta la comprobación. G4 sigue
+bloqueado y ninguna ejecución de entrenamiento está autorizada todavía.
+
 ## Toolchain de LaTeX
 
 El informe se compila con `pdflatex`. Basta cualquiera de estas dos opciones:
