@@ -1,4 +1,6 @@
+import contextlib
 import csv
+import io
 import json
 import subprocess
 import sys
@@ -8,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from PIL import Image
+
 from src.scraper_extraction import (
     MANIFEST_FIELDS,
     PoliteHttpClient,
@@ -16,15 +20,169 @@ from src.scraper_extraction import (
     calculate_sha256,
     duplicate_group_id,
     load_config,
+    main,
     normalize_product_urls,
+    read_csv_rows,
     reconcile_outputs,
     request_with_retries,
+    run_full_crawl,
+    run_smoke_test,
     save_image_idempotently,
     source_asset_id,
     source_asset_identity_key,
     validate_image_bytes,
     validate_image_content_type,
 )
+
+
+class _FakeHTTPResponse:
+    """Respuesta HTTP mínima compatible con PoliteHttpClient.get."""
+
+    def __init__(self, body, content_type, status=200):
+        self.status = status
+        self.body = body
+        self.headers = {"Content-Type": content_type}
+
+    def getcode(self):
+        return self.status
+
+    def read(self, amount=None):
+        if amount is None:
+            return self.body
+
+        return self.body[:amount]
+
+    def close(self):
+        pass
+
+
+def _make_test_image_bytes(color):
+    """Genera bytes PNG válidos y de fondo uniforme para fixtures."""
+
+    buffer = io.BytesIO()
+
+    Image.new(
+        "RGB",
+        (12, 12),
+        color=color,
+    ).save(
+        buffer,
+        format="PNG",
+    )
+
+    return buffer.getvalue()
+
+
+def _build_amarket_fixture(product_count):
+    """Construye colección, fichas e imágenes falsas de Amarket.
+
+    Cada producto aparece dos veces en la colección (con y sin barra
+    final) para probar que la canonicalización/deduplicación produce
+    exactamente `product_count` URLs únicas.
+    """
+
+    collection_url = "https://amarket.com.bo/collections/lo-nuevo"
+    robots_url = "https://amarket.com.bo/robots.txt"
+
+    anchors = "".join(
+        f'<a href="/products/producto-{index}">Producto {index}</a>\n'
+        f'<a href="/products/producto-{index}/">Producto {index} dup</a>\n'
+        for index in range(1, product_count + 1)
+    )
+
+    collection_html = f"<html><body>{anchors}</body></html>".encode(
+        "utf-8"
+    )
+
+    responses = {
+        robots_url: (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+        collection_url: (200, "text/html", collection_html),
+    }
+
+    expected_urls = []
+
+    for index in range(1, product_count + 1):
+        product_url = (
+            f"https://amarket.com.bo/products/producto-{index}"
+        )
+        image_url = (
+            "https://amarket.com.bo/cdn/shop/files/"
+            f"producto-{index}.png"
+        )
+
+        product_html = (
+            "<html><head>"
+            f"<title>Producto {index} — Amarket</title>"
+            f'<meta property="og:title" content="Producto {index}">'
+            '<meta property="og:description" '
+            f'content="Descripcion {index}">'
+            '<meta property="og:image:secure_url" '
+            f'content="{image_url}">'
+            "</head><body></body></html>"
+        ).encode("utf-8")
+
+        image_bytes = _make_test_image_bytes(
+            (10 + index, 10 + index, 10 + index)
+        )
+
+        responses[product_url] = (200, "text/html", product_html)
+        responses[image_url] = (200, "image/png", image_bytes)
+
+        expected_urls.append(product_url)
+
+    return collection_url, responses, sorted(expected_urls)
+
+
+def _patch_amarket_network(responses):
+    """Reemplaza request_with_retries por un doble fiel a las fixtures."""
+
+    def _side_effect(url, **kwargs):
+        if url not in responses:
+            raise AssertionError(
+                f"URL inesperada solicitada en el test: {url}"
+            )
+
+        status, content_type, body = responses[url]
+
+        return _FakeHTTPResponse(body, content_type, status)
+
+    return patch(
+        "src.scraper_extraction.request_with_retries",
+        side_effect=_side_effect,
+    )
+
+
+def _build_fixture_config(root, collection_url, extra_limits=None):
+    """Config mínima de test apuntando a un directorio temporal."""
+
+    limits = {
+        "max_images_per_product": 1,
+        "max_image_bytes": 5_242_880,
+    }
+
+    if extra_limits:
+        limits.update(extra_limits)
+
+    return {
+        "source": {
+            "name": "AMARKET",
+            "collection_url": collection_url,
+        },
+        "http": {
+            "user_agent": "PROJECT_AMARKETBOUNDINGBOXES/1.0 test",
+            "delay_seconds": 0,
+            "timeout_seconds": 20,
+            "max_retries": 3,
+            "backoff_seconds": 0,
+        },
+        "limits": limits,
+        "outputs": {
+            "images_dir": str(root / "images"),
+            "manifest": str(root / "manifest.csv"),
+            "rejects": str(root / "rejects.csv"),
+            "summary": str(root / "summary.json"),
+        },
+    }
 
 
 class TestScraperExtraction(unittest.TestCase):
@@ -1021,6 +1179,491 @@ class TestScraperExtraction(unittest.TestCase):
             self.assertEqual(
                 summary_file["rejection_rows"],
                 1,
+            )
+
+    def test_smoke_and_full_crawl_are_mutually_exclusive(self):
+        """--smoke-test y --full-crawl no pueden usarse juntos."""
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "src/scraper_extraction.py",
+                "--smoke-test",
+                "--full-crawl",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(
+            result.returncode,
+            0,
+        )
+
+        self.assertIn(
+            "not allowed with argument",
+            result.stderr,
+        )
+
+    def test_full_crawl_rejects_limit_argument(self):
+        """--limit no debe aceptarse (ni ignorarse) junto a --full-crawl."""
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "src/scraper_extraction.py",
+                "--full-crawl",
+                "--limit",
+                "5",
+                "--config",
+                "configs/data_sources_full.yaml",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(
+            result.returncode,
+            0,
+        )
+
+        self.assertIn(
+            "--limit no es compatible con --full-crawl",
+            result.stderr,
+        )
+
+    def test_no_mode_means_zero_network_access(self):
+        """Sin --smoke-test ni --full-crawl no debe haber acceso a red."""
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError(
+                "No debía llamarse a la red sin un modo explícito."
+            )
+
+        output = io.StringIO()
+
+        with patch(
+            "src.scraper_extraction.request_with_retries",
+            side_effect=_fail_if_called,
+        ):
+            with patch(
+                "sys.argv",
+                ["src/scraper_extraction.py"],
+            ):
+                with contextlib.redirect_stdout(output):
+                    main()
+
+        self.assertIn(
+            "No se accede a red",
+            output.getvalue(),
+        )
+
+    def test_full_crawl_config_requires_rights_section(self):
+        """La config full sin sección rights debe fallar antes de red."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = (
+                Path(temp_dir) / "full_no_rights.yaml"
+            )
+
+            config_path.write_text(
+                "source:\n"
+                "  name: AMARKET\n"
+                "  collection_url: "
+                "https://amarket.com.bo/collections/lo-nuevo\n"
+                "http:\n"
+                "  user_agent: "
+                "PROJECT_AMARKETBOUNDINGBOXES/1.0 test\n"
+                "  delay_seconds: 1.0\n"
+                "  timeout_seconds: 20\n"
+                "  max_retries: 3\n"
+                "  backoff_seconds: 2.0\n"
+                "limits:\n"
+                "  max_images_per_product: 1\n"
+                "  max_image_bytes: 5242880\n"
+                "outputs:\n"
+                "  images_dir: data/raw/amarket_full\n"
+                "  manifest: "
+                "data/manifests/source_assets_full.csv\n"
+                "  rejects: "
+                "data/manifests/scrape_rejections_full.csv\n"
+                "  summary: outputs/scrape_summary_full.json\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "rights",
+            ):
+                load_config(
+                    config_path,
+                    mode="full",
+                )
+
+    def test_full_crawl_config_validated_before_any_network_access(self):
+        """rights.status incorrecto falla antes de tocar la red."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = (
+                Path(temp_dir) / "full_bad_rights.yaml"
+            )
+
+            config_path.write_text(
+                "source:\n"
+                "  name: AMARKET\n"
+                "  collection_url: "
+                "https://amarket.com.bo/collections/lo-nuevo\n"
+                "http:\n"
+                "  user_agent: "
+                "PROJECT_AMARKETBOUNDINGBOXES/1.0 test\n"
+                "  delay_seconds: 1.0\n"
+                "  timeout_seconds: 20\n"
+                "  max_retries: 3\n"
+                "  backoff_seconds: 2.0\n"
+                "limits:\n"
+                "  max_images_per_product: 1\n"
+                "  max_image_bytes: 5242880\n"
+                "rights:\n"
+                "  status: NEGOTIABLE\n"
+                "outputs:\n"
+                "  images_dir: data/raw/amarket_full\n"
+                "  manifest: "
+                "data/manifests/source_assets_full.csv\n"
+                "  rejects: "
+                "data/manifests/scrape_rejections_full.csv\n"
+                "  summary: outputs/scrape_summary_full.json\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "src.scraper_extraction.request_with_retries",
+                side_effect=AssertionError(
+                    "No debía llamarse a la red."
+                ),
+            ) as mocked_request:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "REDISTRIBUTION_PROHIBITED",
+                ):
+                    load_config(
+                        config_path,
+                        mode="full",
+                    )
+
+            self.assertEqual(
+                mocked_request.call_count,
+                0,
+            )
+
+    def test_full_crawl_config_rejects_oversized_image_limit(self):
+        """max_image_bytes > 5 MiB debe fallar en full crawl."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = (
+                Path(temp_dir) / "full_oversized.yaml"
+            )
+
+            config_path.write_text(
+                "source:\n"
+                "  name: AMARKET\n"
+                "  collection_url: "
+                "https://amarket.com.bo/collections/lo-nuevo\n"
+                "http:\n"
+                "  user_agent: "
+                "PROJECT_AMARKETBOUNDINGBOXES/1.0 test\n"
+                "  delay_seconds: 1.0\n"
+                "  timeout_seconds: 20\n"
+                "  max_retries: 3\n"
+                "  backoff_seconds: 2.0\n"
+                "limits:\n"
+                "  max_images_per_product: 1\n"
+                "  max_image_bytes: 6000000\n"
+                "rights:\n"
+                "  status: REDISTRIBUTION_PROHIBITED\n"
+                "outputs:\n"
+                "  images_dir: data/raw/amarket_full\n"
+                "  manifest: "
+                "data/manifests/source_assets_full.csv\n"
+                "  rejects: "
+                "data/manifests/scrape_rejections_full.csv\n"
+                "  summary: outputs/scrape_summary_full.json\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "5 MiB",
+            ):
+                load_config(
+                    config_path,
+                    mode="full",
+                )
+
+    def test_full_crawl_config_does_not_require_max_products(self):
+        """La config full válida no exige ni conserva max_products."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = (
+                Path(temp_dir) / "full_valid.yaml"
+            )
+
+            config_path.write_text(
+                "source:\n"
+                "  name: AMARKET\n"
+                "  collection_url: "
+                "https://amarket.com.bo/collections/lo-nuevo\n"
+                "http:\n"
+                "  user_agent: "
+                "PROJECT_AMARKETBOUNDINGBOXES/1.0 test\n"
+                "  delay_seconds: 1.0\n"
+                "  timeout_seconds: 20\n"
+                "  max_retries: 3\n"
+                "  backoff_seconds: 2.0\n"
+                "limits:\n"
+                "  max_images_per_product: 1\n"
+                "  max_image_bytes: 5242880\n"
+                "rights:\n"
+                "  status: REDISTRIBUTION_PROHIBITED\n"
+                "outputs:\n"
+                "  images_dir: data/raw/amarket_full\n"
+                "  manifest: "
+                "data/manifests/source_assets_full.csv\n"
+                "  rejects: "
+                "data/manifests/scrape_rejections_full.csv\n"
+                "  summary: outputs/scrape_summary_full.json\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(
+                config_path,
+                mode="full",
+            )
+
+            self.assertNotIn(
+                "max_products",
+                config["limits"],
+            )
+
+    def test_data_sources_full_yaml_is_valid_and_relative(self):
+        """El YAML entregado cumple los valores contractuales del punto 4."""
+
+        config = load_config(
+            "configs/data_sources_full.yaml",
+            mode="full",
+        )
+
+        self.assertEqual(
+            config["http"]["delay_seconds"],
+            1.0,
+        )
+
+        self.assertEqual(
+            config["http"]["timeout_seconds"],
+            20,
+        )
+
+        self.assertEqual(
+            config["http"]["max_retries"],
+            3,
+        )
+
+        self.assertEqual(
+            config["http"]["backoff_seconds"],
+            2.0,
+        )
+
+        self.assertEqual(
+            config["limits"]["max_image_bytes"],
+            5242880,
+        )
+
+        self.assertEqual(
+            config["rights"]["status"],
+            "REDISTRIBUTION_PROHIBITED",
+        )
+
+        for key in (
+            "images_dir",
+            "manifest",
+            "rejects",
+            "summary",
+        ):
+            path_value = config["outputs"][key]
+
+            self.assertFalse(
+                Path(path_value).is_absolute(),
+                f"outputs.{key} no debe ser una ruta absoluta: "
+                f"{path_value}",
+            )
+
+    def test_smoke_test_stays_limited_to_three(self):
+        """--smoke-test sigue limitado a 3 productos con 5 disponibles."""
+
+        collection_url, responses, expected_urls = (
+            _build_amarket_fixture(5)
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            config = _build_fixture_config(
+                root,
+                collection_url,
+                extra_limits={"max_products": 3},
+            )
+
+            with _patch_amarket_network(responses):
+                summary = run_smoke_test(
+                    config,
+                    limit=3,
+                )
+
+            self.assertEqual(
+                summary["selected_products"],
+                3,
+            )
+
+            self.assertEqual(
+                summary["accepted"],
+                3,
+            )
+
+            manifest_rows = read_csv_rows(
+                config["outputs"]["manifest"]
+            )
+
+            processed_urls = sorted(
+                row["product_page_url"]
+                for row in manifest_rows
+            )
+
+            self.assertEqual(
+                processed_urls,
+                expected_urls[:3],
+            )
+
+    def test_full_crawl_processes_all_unique_urls(self):
+        """Full crawl procesa todas las URLs únicas, sin límite ni slicing."""
+
+        collection_url, responses, expected_urls = (
+            _build_amarket_fixture(5)
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            config = _build_fixture_config(
+                root,
+                collection_url,
+            )
+
+            self.assertNotIn(
+                "max_products",
+                config["limits"],
+            )
+
+            with _patch_amarket_network(responses):
+                summary = run_full_crawl(config)
+
+            self.assertEqual(
+                summary["selected_products"],
+                5,
+            )
+
+            self.assertEqual(
+                summary["accepted"],
+                5,
+            )
+
+            manifest_rows = read_csv_rows(
+                config["outputs"]["manifest"]
+            )
+
+            processed_urls = sorted(
+                row["product_page_url"]
+                for row in manifest_rows
+            )
+
+            self.assertEqual(
+                processed_urls,
+                expected_urls,
+            )
+
+    def test_full_crawl_idempotency_and_resume(self):
+        """Segunda corrida de full crawl no duplica ni sobrescribe evidencia."""
+
+        collection_url, responses, expected_urls = (
+            _build_amarket_fixture(4)
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            config = _build_fixture_config(
+                root,
+                collection_url,
+            )
+
+            with _patch_amarket_network(responses):
+                first_summary = run_full_crawl(config)
+
+            first_manifest_rows = read_csv_rows(
+                config["outputs"]["manifest"]
+            )
+
+            first_hashes = sorted(
+                row["sha256"]
+                for row in first_manifest_rows
+            )
+
+            with _patch_amarket_network(responses):
+                second_summary = run_full_crawl(config)
+
+            second_manifest_rows = read_csv_rows(
+                config["outputs"]["manifest"]
+            )
+
+            second_hashes = sorted(
+                row["sha256"]
+                for row in second_manifest_rows
+            )
+
+            self.assertEqual(
+                first_summary["accepted"],
+                4,
+            )
+
+            self.assertEqual(
+                first_summary["accepted_this_run"],
+                4,
+            )
+
+            self.assertEqual(
+                second_summary["accepted"],
+                4,
+            )
+
+            self.assertEqual(
+                second_summary["accepted_this_run"],
+                0,
+            )
+
+            self.assertEqual(
+                len(second_manifest_rows),
+                4,
+            )
+
+            self.assertEqual(
+                first_hashes,
+                second_hashes,
+            )
+
+            self.assertEqual(
+                sorted(
+                    row["product_page_url"]
+                    for row in second_manifest_rows
+                ),
+                expected_urls,
             )
 
 

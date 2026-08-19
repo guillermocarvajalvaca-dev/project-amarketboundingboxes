@@ -314,7 +314,9 @@ def parse_args():
         ),
     )
 
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+
+    mode_group.add_argument(
         "--smoke-test",
         action="store_true",
         help=(
@@ -323,10 +325,20 @@ def parse_args():
         ),
     )
 
+    mode_group.add_argument(
+        "--full-crawl",
+        action="store_true",
+        help=(
+            "Ejecuta el crawl completo sobre "
+            "todas las URLs únicas de la colección. "
+            "Mutuamente excluyente con --smoke-test."
+        ),
+    )
+
     return parser.parse_args()
 
 
-def load_config(config_path):
+def load_config(config_path, mode="smoke"):
     """Carga y valida configuración antes de red."""
 
     path = Path(config_path)
@@ -355,6 +367,25 @@ def load_config(config_path):
                 f"'{section}' en la configuración."
             )
 
+    if mode == "full" and "rights" not in config:
+        raise ValueError(
+            "Falta la sección obligatoria "
+            "'rights' en la configuración de full crawl."
+        )
+
+    limits_keys = (
+        (
+            "max_images_per_product",
+            "max_image_bytes",
+        )
+        if mode == "full"
+        else (
+            "max_products",
+            "max_images_per_product",
+            "max_image_bytes",
+        )
+    )
+
     required_values = {
         "source": (
             "name",
@@ -367,11 +398,7 @@ def load_config(config_path):
             "max_retries",
             "backoff_seconds",
         ),
-        "limits": (
-            "max_products",
-            "max_images_per_product",
-            "max_image_bytes",
-        ),
+        "limits": limits_keys,
         "outputs": (
             "images_dir",
             "manifest",
@@ -416,6 +443,23 @@ def load_config(config_path):
             "limits.max_image_bytes debe ser "
             "un entero positivo."
         )
+
+    if mode == "full":
+        if max_image_bytes > 5_242_880:
+            raise ValueError(
+                "limits.max_image_bytes no puede superar "
+                "5 MiB (5242880 bytes) en full crawl."
+            )
+
+        rights_status = config["rights"].get(
+            "status"
+        )
+
+        if rights_status != "REDISTRIBUTION_PROHIBITED":
+            raise ValueError(
+                "rights.status debe ser "
+                "REDISTRIBUTION_PROHIBITED en full crawl."
+            )
 
     return config
 
@@ -1754,13 +1798,474 @@ def run_smoke_test(
     return summary
 
 
+def run_full_crawl(config):
+    """Ejecuta el crawl completo, sin límite artificial ni slicing.
+
+    Función independiente de run_smoke_test para no alterar el
+    comportamiento ya validado del piloto (SCR-001/PR #11).
+    """
+
+    client = PoliteHttpClient(
+        config
+    )
+
+    collection_url = (
+        config["source"][
+            "collection_url"
+        ]
+    )
+
+    source_name = (
+        config["source"][
+            "name"
+        ]
+    )
+
+    images_dir = Path(
+        config["outputs"][
+            "images_dir"
+        ]
+    )
+
+    manifest_path = Path(
+        config["outputs"][
+            "manifest"
+        ]
+    )
+
+    rejects_path = Path(
+        config["outputs"][
+            "rejects"
+        ]
+    )
+
+    summary_path = Path(
+        config["outputs"][
+            "summary"
+        ]
+    )
+
+    run_id = str(
+        uuid.uuid4()
+    )
+
+    print(
+        "1/5 Verificando robots.txt..."
+    )
+
+    robots_parser = check_robots(
+        client,
+        collection_url,
+        collection_url,
+    )
+
+    print(
+        "2/5 Descargando colección..."
+    )
+
+    collection_response = client.get(
+        collection_url
+    )
+
+    if (
+        collection_response["status"]
+        != 200
+    ):
+        raise RuntimeError(
+            "La colección no respondió HTTP 200."
+        )
+
+    validate_html_content_type(
+        collection_response[
+            "content_type"
+        ]
+    )
+
+    product_urls = extract_product_urls(
+        collection_response[
+            "body"
+        ],
+        collection_url,
+    )
+
+    if not product_urls:
+        raise RuntimeError(
+            "No se encontraron URLs de producto."
+        )
+
+    selected_urls = product_urls
+
+    print(
+        f"3/5 Productos seleccionados: "
+        f"{len(selected_urls)}"
+    )
+
+    previous_manifest = read_csv_rows(
+        manifest_path
+    )
+
+    previous_rejections = read_csv_rows(
+        rejects_path
+    )
+
+    manifest_by_id = {
+        row["source_asset_id"]: row
+        for row
+        in previous_manifest
+        if row.get(
+            "source_asset_id"
+        )
+    }
+
+    manifest_by_identity = {
+        source_asset_identity_key(
+            row.get("source_name", ""),
+            row.get("product_page_url", ""),
+            row.get("image_url", ""),
+            row.get("sha256", ""),
+        ): row
+        for row in previous_manifest
+        if row.get("sha256")
+    }
+
+    rejection_rows = list(
+        previous_rejections
+    )
+
+    accepted_this_run = 0
+    rejected_this_run = 0
+
+    for index, product_url in enumerate(
+        selected_urls,
+        start=1,
+    ):
+        print(
+            f"   Producto "
+            f"{index}/{len(selected_urls)}"
+        )
+
+        image_url = ""
+
+        try:
+            if not robots_parser.can_fetch(
+                client.user_agent,
+                product_url,
+            ):
+                raise PermissionError(
+                    "ROBOTS_PRODUCT_BLOCKED"
+                )
+
+            product_response = client.get(
+                product_url
+            )
+
+            if (
+                product_response[
+                    "status"
+                ]
+                != 200
+            ):
+                raise RuntimeError(
+                    "PRODUCT_HTTP_NOT_200"
+                )
+
+            validate_html_content_type(
+                product_response[
+                    "content_type"
+                ]
+            )
+
+            metadata = extract_product_metadata(
+                product_response[
+                    "body"
+                ],
+                product_url,
+            )
+
+            image_url = metadata[
+                "image_url"
+            ]
+
+            if not robots_parser.can_fetch(
+                client.user_agent,
+                image_url,
+            ):
+                raise PermissionError(
+                    "ROBOTS_IMAGE_BLOCKED"
+                )
+
+            image_response = client.get(
+                image_url,
+                max_bytes=int(
+                    config["limits"][
+                        "max_image_bytes"
+                    ]
+                ),
+            )
+
+            if (
+                image_response[
+                    "status"
+                ]
+                != 200
+            ):
+                raise RuntimeError(
+                    "IMAGE_HTTP_NOT_200"
+                )
+
+            content_type = validate_image_content_type(
+                image_response[
+                    "content_type"
+                ]
+            )
+
+            image_bytes = image_response[
+                "body"
+            ]
+
+            image_info = inspect_image(
+                image_bytes
+            )
+
+            if (
+                image_info[
+                    "background_mode"
+                ]
+                not in (
+                    "TRANSPARENT_ALPHA",
+                    "UNIFORM_RGB",
+                )
+            ):
+                raise ValueError(
+                    "BACKGROUND_COMPLEX"
+                )
+
+            sha256 = calculate_sha256(
+                image_bytes
+            )
+
+            group_id = duplicate_group_id(
+                image_bytes
+            )
+
+            asset_id = source_asset_id(
+                source_name,
+                metadata[
+                    "product_page_url"
+                ],
+                image_url,
+                sha256,
+            )
+
+            extension = extension_from_image(
+                image_info,
+                content_type,
+            )
+
+            filename = (
+                f"{metadata['sku_id']}"
+                f"_{sha256[:12]}"
+                f"{extension}"
+            )
+
+            destination = (
+                images_dir
+                / filename
+            )
+
+            save_result = save_image_idempotently(
+                destination,
+                image_bytes,
+            )
+
+            row = {
+                "source_asset_id": asset_id,
+                "sku_id": metadata[
+                    "sku_id"
+                ],
+                "product_name": metadata[
+                    "product_name"
+                ],
+                "description": metadata[
+                    "description"
+                ],
+                "source_name": source_name,
+                "product_page_url": metadata[
+                    "product_page_url"
+                ],
+                "image_url": image_url,
+                "retrieved_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "retrieval_run_id": run_id,
+                "http_status": str(
+                    image_response[
+                        "status"
+                    ]
+                ),
+                "content_type": content_type,
+                "scraper_version": SCRAPER_VERSION,
+                "sha256": sha256,
+                "duplicate_group_id": group_id,
+                "width_px": str(
+                    image_info[
+                        "width_px"
+                    ]
+                ),
+                "height_px": str(
+                    image_info[
+                        "height_px"
+                    ]
+                ),
+                "image_mode": image_info[
+                    "image_mode"
+                ],
+                "background_mode": image_info[
+                    "background_mode"
+                ],
+                "rights_status": (
+                    "REDISTRIBUTION_PROHIBITED"
+                ),
+                "acceptance_status": (
+                    "ACCEPTED"
+                ),
+                "rejection_reason": "",
+                "local_path": save_result[
+                    "path"
+                ],
+            }
+
+            identity_key = source_asset_identity_key(
+                source_name,
+                metadata["product_page_url"],
+                image_url,
+                sha256,
+            )
+
+            if (
+                asset_id not in manifest_by_id
+                and identity_key not in manifest_by_identity
+            ):
+                accepted_this_run += 1
+                manifest_by_id[
+                    asset_id
+                ] = row
+                manifest_by_identity[
+                    identity_key
+                ] = row
+
+            print(
+                "      ACCEPTED "
+                f"SKU={metadata['sku_id']}"
+            )
+
+        except Exception as error:
+            reason = (
+                f"{type(error).__name__}: "
+                f"{error}"
+            )
+
+            rejection_rows.append(
+                make_rejection(
+                    product_url,
+                    image_url,
+                    run_id,
+                    reason,
+                )
+            )
+
+            rejected_this_run += 1
+
+            print(
+                "      REJECTED "
+                f"{reason}"
+            )
+
+    manifest_rows = sorted(
+        manifest_by_id.values(),
+        key=lambda row: row[
+            "source_asset_id"
+        ],
+    )
+
+    atomic_write_csv(
+        manifest_path,
+        manifest_rows,
+        MANIFEST_FIELDS,
+    )
+
+    atomic_write_csv(
+        rejects_path,
+        rejection_rows,
+        REJECTION_FIELDS,
+    )
+
+    summary = reconcile_outputs(
+        manifest_rows,
+        rejection_rows,
+        images_dir,
+    )
+
+    summary.update(
+        {
+            "retrieval_run_id": run_id,
+            "selected_products": len(
+                selected_urls
+            ),
+            "accepted_this_run": (
+                accepted_this_run
+            ),
+            "rejected_this_run": (
+                rejected_this_run
+            ),
+        }
+    )
+
+    atomic_write_json(
+        summary_path,
+        summary,
+    )
+
+    print(
+        "4/5 Outputs escritos."
+    )
+
+    print(
+        "5/5 Resumen:"
+    )
+
+    print(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+    return summary
+
+
 def main():
     """Punto de entrada."""
 
     args = parse_args()
 
+    if args.full_crawl and args.limit is not None:
+        raise ValueError(
+            "--limit no es compatible con --full-crawl: "
+            "el crawl completo procesa todas las URLs "
+            "únicas sin límites artificiales."
+        )
+
+    mode = (
+        "full"
+        if args.full_crawl
+        else "smoke"
+    )
+
     config = load_config(
-        args.config
+        args.config,
+        mode=mode,
     )
 
     if args.output_dir is not None:
@@ -1773,31 +2278,35 @@ def main():
             args.manifest
         )
 
-    configured_limit = int(
-        config["limits"][
-            "max_products"
-        ]
-    )
+    if args.full_crawl:
+        limit = None
 
-    limit = (
-        args.limit
-        if args.limit is not None
-        else configured_limit
-    )
-
-    if limit < 1:
-        raise ValueError(
-            "El límite debe ser "
-            "mayor o igual a 1."
+    else:
+        configured_limit = int(
+            config["limits"][
+                "max_products"
+            ]
         )
 
-    if limit > configured_limit:
-        raise ValueError(
-            f"El límite solicitado ({limit}) "
-            f"supera el máximo permitido "
-            f"por la configuración "
-            f"({configured_limit})."
+        limit = (
+            args.limit
+            if args.limit is not None
+            else configured_limit
         )
+
+        if limit < 1:
+            raise ValueError(
+                "El límite debe ser "
+                "mayor o igual a 1."
+            )
+
+        if limit > configured_limit:
+            raise ValueError(
+                f"El límite solicitado ({limit}) "
+                f"supera el máximo permitido "
+                f"por la configuración "
+                f"({configured_limit})."
+            )
 
     print(
         "Configuración válida."
@@ -1819,6 +2328,11 @@ def main():
     )
 
     print(
+        "Full crawl:",
+        args.full_crawl,
+    )
+
+    print(
         "Max image bytes:",
         config["limits"]["max_image_bytes"],
     )
@@ -1833,10 +2347,16 @@ def main():
         config["outputs"]["manifest"],
     )
 
+    if args.full_crawl:
+        run_full_crawl(
+            config
+        )
+        return
+
     if not args.smoke_test:
         print(
             "No se accede a red sin "
-            "--smoke-test."
+            "--smoke-test ni --full-crawl."
         )
         return
 
