@@ -111,7 +111,7 @@ https://github.com/guillermocarvajalvaca-dev/project-amarketboundingboxes/pull/1
 - 7 commits, 8 files changed
 - Reviewer: Monserrat Barba (@mbarbacardozo)
 - Closes #5
-- Estado: Awaiting approval (16/08, ~21:05)
+- Estado: MERGEADO (17c4ac3), issue #5 completed
 
 BOX-001 queda formalmente entregado. Próximo trabajo: trasladar
 make_splits.py + configs/dataset.yaml a feat/andres/SPL-001-make-splits
@@ -170,11 +170,11 @@ Monserrat (revisión REQUEST_CHANGES) encontró 2 hallazgos reales:
 
 19/19 tests en verde tras ambas correcciones. Script de muestra
 reproducible sigue funcionando sin cambios de comportamiento.
-Pendiente: esperar nueva revisión de Monserrat sobre PR #18.
+PR #18 mergeado a main (commit 17c4ac3). Issue #5 completed. 19/19 tests aprobados por Monserrat. Ejecucion real: NOT_RUN. Estado G3: PARTIAL.
 
 ## Issue #24 (BOX-EV-001) — PR abierto
 Evidencia de BOX-001 registrada en el ledger vivo (ADR-003):
 - docs/evidence/2026-08-19_BOX-001_implementation_validation.md
 - Fila EV-G3-BOX-001 en docs/evidence/EVIDENCE_LEDGER.csv
 - Alcance estrictamente documental, sin tocar código/tests/FROZEN
-- Reviewer: Monserrat. Estado: Awaiting approval.
+- Reviewer: Monserrat. Estado: En correccion tras revision de coordinacion de Guillermo (ver PR #26 para detalle vigente).

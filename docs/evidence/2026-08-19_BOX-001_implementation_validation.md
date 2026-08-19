@@ -48,16 +48,17 @@ pytest tests/test_make_boxes.py tests/test_box_audit.py -v
 
 ## Revisión independiente (Monserrat)
 
-Dos rondas de revisión:
+Tres submissions de revisión registradas:
 
-1. **Primera ronda — REQUEST_CHANGES:** 2 hallazgos —
+1. **CHANGES_REQUESTED:** 2 hallazgos —
    (a) `audit_image` no integraba `make_mask_from_rgb` para el caso RGB
    con fondo uniforme; (b) escritura del label `.txt` no era atómica.
    Ambos corregidos (commits `8e1746a` y `1955640`).
-2. **Segunda ronda — APPROVE:** reproducción completa sobre commit
-   `0f95d71`, 19/19 tests, QA visual confirmado, reproducibilidad por
-   SHA-256 verificada.
-3. **Re-aprobación tras hallazgo menor:** commit `1863900` corrigió
+2. **APPROVED sobre commit `0f95d71`:** reproducción completa, 19/19
+   tests, QA visual confirmado, reproducibilidad por SHA-256 verificada.
+   Esta aprobación quedó posteriormente DISMISSED de forma automática
+   al cambiar el head (protección de rama: dismiss_stale_reviews).
+3. **APPROVED final sobre commit `1863900`:** commit que corrigió
    nomenclatura de test (29→30 columnas); Monserrat re-aprobó sobre
    ese commit tras confirmar que el delta no afectaba lógica.
 
