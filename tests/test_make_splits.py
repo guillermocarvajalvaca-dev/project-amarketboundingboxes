@@ -179,3 +179,92 @@ def test_group_exclusivity_source_asset_id_independiente_de_sku():
         "Filas del mismo sku_id deben quedar en el mismo split, "
         "incluso con distinto duplicate_group_id"
     )
+
+
+def test_group_exclusivity_source_asset_id_aislado():
+    """Hallazgo Guillermo (PR #23, code owner review): caso aislado
+    donde el mismo source_asset_id aparece en filas con sku_id Y
+    duplicate_group_id DISTINTOS (a diferencia del test anterior, que
+    solo aislaba sku_id). Verifica que la exclusividad de
+    source_asset_id se cumpla incluso en este caso adversarial."""
+    manifest = pd.DataFrame(
+        [
+            ("SKU_A", "SHARED_ASSET", "DUP_1"),
+            ("SKU_B", "SHARED_ASSET", "DUP_2"),  # mismo asset, sku Y dup distintos
+            ("SKU_C", "A_OTHER_1", "DUP_3"),
+            ("SKU_D", "A_OTHER_2", "DUP_4"),
+        ],
+        columns=["sku_id", "source_asset_id", "duplicate_group_id"],
+    )
+    splits = make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+    shared_rows = splits[splits["source_asset_id"] == "SHARED_ASSET"]
+    assert shared_rows["split"].nunique() == 1, (
+        "SHARED_ASSET aparece en mas de un split pese a compartir "
+        "source_asset_id, aunque sku_id y duplicate_group_id difieran"
+    )
+
+
+def test_columnas_obligatorias_faltantes_da_error_claro():
+    """Hallazgo Guillermo: falta de columnas obligatorias debe dar
+    ValueError claro, no un KeyError críptico de pandas."""
+    manifest = pd.DataFrame(
+        [("SKU001", "A001")],
+        columns=["sku_id", "source_asset_id"],  # falta duplicate_group_id
+    )
+    with pytest.raises(ValueError, match="columnas obligatorias faltantes"):
+        make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+
+def test_valores_nulos_en_identificadores_de_grupo_da_error():
+    """Hallazgo Guillermo: nulos en sku_id/source_asset_id/duplicate_group_id
+    deben rechazarse explícitamente."""
+    manifest = pd.DataFrame(
+        [
+            ("SKU001", "A001", "DUP_A"),
+            (None, "A002", "DUP_B"),
+            ("SKU003", "A003", "DUP_C"),
+        ],
+        columns=["sku_id", "source_asset_id", "duplicate_group_id"],
+    )
+    with pytest.raises(ValueError, match="valores nulos"):
+        make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+
+def test_class_id_distinto_de_cero_da_error():
+    """Hallazgo Guillermo: si class_id está presente, debe ser 0 en
+    todas las filas (dataset monoclase)."""
+    manifest = sample_manifest()
+    manifest["class_id"] = 0
+    manifest.loc[0, "class_id"] = 1  # una fila con clase incorrecta
+
+    with pytest.raises(ValueError, match="class_id debe ser 0"):
+        make_splits(manifest, ratios=(0.5, 0.25, 0.25), seed=42)
+
+
+def test_ratios_con_numero_incorrecto_de_valores_da_error():
+    """Hallazgo Guillermo: ratios debe tener exactamente 3 valores."""
+    manifest = sample_manifest()
+    with pytest.raises(ValueError, match="exactamente 3 valores"):
+        make_splits(manifest, ratios=(0.5, 0.5), seed=42)
+
+
+def test_ratios_negativos_da_error():
+    """Hallazgo Guillermo: ratios no puede contener valores negativos."""
+    manifest = sample_manifest()
+    with pytest.raises(ValueError, match="valores negativos"):
+        make_splits(manifest, ratios=(0.8, 0.3, -0.1), seed=42)
+
+
+def test_ratios_no_numericos_da_error():
+    """Hallazgo Guillermo: ratios debe contener solo números."""
+    manifest = sample_manifest()
+    with pytest.raises(ValueError, match="solo numeros"):
+        make_splits(manifest, ratios=(0.5, 0.25, "resto"), seed=42)
+
+
+def test_ratios_que_no_suman_uno_da_error():
+    """Hallazgo Guillermo: ratios debe sumar 1.0."""
+    manifest = sample_manifest()
+    with pytest.raises(ValueError, match="debe sumar 1.0"):
+        make_splits(manifest, ratios=(0.5, 0.3, 0.3), seed=42)

@@ -61,6 +61,9 @@ def make_splits(manifest: pd.DataFrame, ratios=(0.7, 0.15, 0.15), seed=42):
     independencia real entre los 3 splits y se detiene con ValueError
     (no se crea independencia artificial mediante copias, §6 SDD).
     """
+    _validate_manifest_contract(manifest)
+    _validate_ratios(ratios)
+
     groups = _build_groups(manifest)
 
     if len(groups) < 3:
@@ -88,3 +91,54 @@ def make_splits(manifest: pd.DataFrame, ratios=(0.7, 0.15, 0.15), seed=42):
     result = manifest.copy()
     result["split"] = result.index.map(split_by_row_idx)
     return result
+
+REQUIRED_COLUMNS = ("sku_id", "source_asset_id", "duplicate_group_id")
+
+
+def _validate_manifest_contract(manifest: pd.DataFrame) -> None:
+    """Valida columnas obligatorias, ausencia de nulos en identificadores
+    de grupo, y class_id == 0 si esa columna esta presente. No admite
+    defaults ocultos: cualquier incumplimiento levanta ValueError claro.
+    """
+    missing = [c for c in REQUIRED_COLUMNS if c not in manifest.columns]
+    if missing:
+        raise ValueError(
+            f"columnas obligatorias faltantes en el manifest: {missing}"
+        )
+
+    for col in REQUIRED_COLUMNS:
+        if manifest[col].isnull().any():
+            raise ValueError(
+                f"columna '{col}' contiene valores nulos; los "
+                f"identificadores de grupo no pueden ser nulos"
+            )
+
+    if "class_id" in manifest.columns:
+        if not (manifest["class_id"] == 0).all():
+            raise ValueError(
+                "class_id debe ser 0 para todas las filas (dataset "
+                "monoclase 'product')"
+            )
+
+
+def _validate_ratios(ratios) -> None:
+    """Valida que ratios tenga exactamente 3 valores numericos no
+    negativos que sumen 1 (con tolerancia de punto flotante)."""
+    if len(ratios) != 3:
+        raise ValueError(
+            f"ratios debe tener exactamente 3 valores (train, val, test); "
+            f"recibido: {len(ratios)}"
+        )
+
+    for r in ratios:
+        if not isinstance(r, (int, float)) or isinstance(r, bool):
+            raise ValueError(f"ratios debe contener solo numeros; recibido: {r!r}")
+        if r < 0:
+            raise ValueError(f"ratios no puede contener valores negativos; recibido: {r}")
+
+    total = sum(ratios)
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(
+            f"ratios debe sumar 1.0; suma actual: {total}"
+        )
+
