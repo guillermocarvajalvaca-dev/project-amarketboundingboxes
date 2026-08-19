@@ -42,30 +42,68 @@ python -m pip install -r requirements.txt
 
 ## Verificación
 
+Dependencias de runtime:
+
 ```bash
-python -c "import PIL, numpy, yaml; from ultralytics import YOLO; print('OK')"
+python -c "import PIL, numpy, yaml, pandas; from ultralytics import YOLO; print('OK')"
 ```
 
-Verificado el 2026-08-16 en venv limpio con pip 24.0. Resultado: importación correcta de
-las cuatro dependencias directas y de `YOLO`.
+Runner de pruebas gobernante:
 
-Referencia del tamaño: el entorno completo ocupa aproximadamente **1,05 GB** y resuelve
-39 paquetes a partir de las cuatro declaraciones directas. La mayor parte es `torch`.
+```bash
+python -m pytest -q
+```
+
+ENV-001, 2026-08-16 — evidencia histórica: verificado en venv limpio con pip 24.0.
+Importación correcta de las cuatro dependencias directas de entonces y de `YOLO`. Esa
+medición no cubre `pandas` ni `pytest`, que no existían en el conjunto declarado.
+
+ENV-002, 2026-08-19: verificado sobre ese mismo `.venv`, con Python **3.11.9** y pip 24.0.
+Resultados observados:
+
+| Comprobación | Resultado | Exit code |
+|---|---|---|
+| `sys.version` | `3.11.9` | 0 |
+| `pandas.__version__` | `3.0.5` | 0 |
+| `pytest.__version__` | `9.1.1` | 0 |
+| `pip check` | «No broken requirements found» | 0 |
+| `python -m pytest -q` | 25 passed, 3 warnings | 0 |
+
+`pandas 3.0.5` y `pytest 9.1.1` son por tanto compatibles con Python 3.11.9 en este
+entorno; `pandas` se instaló desde el wheel `pandas-3.0.5-cp311-cp311-win_amd64.whl`.
+
+Transitivas que resolvió la instalación, **ninguna declarada como directa**:
+
+- de `pandas`: `tzdata 2026.3`.
+- de `pytest`: `colorama 0.4.6`, `iniconfig 2.3.0`, `pluggy 1.6.0`, `Pygments 2.21.0`.
+  `packaging 26.3` ya estaba satisfecha por el árbol previo.
+
+Referencia del tamaño: en la medición de ENV-001 el entorno ocupaba aproximadamente
+**1,05 GB** y resolvía 39 paquetes desde cuatro declaraciones directas. Medido de nuevo
+tras ENV-002 ocupa aproximadamente **1,2 GB** y `pip list` enumera 48 paquetes —`pip`
+incluido— desde seis declaraciones directas. La mayor parte sigue siendo `torch`.
 
 ## Dependencias
 
-`requirements.txt` declara **solo las directas**:
+`requirements.txt` declara **solo las directas**, y son **seis**:
 
-| Paquete | Pin | Para qué |
-|---|---|---|
-| `pillow` | `12.3.0` | decodificación de imágenes, canal alfa, máscaras |
-| `numpy` | `2.4.6` | operaciones sobre máscaras y extremos de píxel |
-| `ultralytics` | `8.4.120` | detector YOLO: entrenamiento, evaluación e inferencia |
-| `PyYAML` | `6.0.3` | lectura de los `configs/*.yaml` del contrato |
+| Paquete | Pin | Rol | Para qué |
+|---|---|---|---|
+| `pillow` | `12.3.0` | runtime | decodificación de imágenes, canal alfa, máscaras |
+| `numpy` | `2.4.6` | runtime | operaciones sobre máscaras y extremos de píxel |
+| `ultralytics` | `8.4.120` | runtime | detector YOLO: entrenamiento, evaluación e inferencia |
+| `PyYAML` | `6.0.3` | runtime | lectura de los `configs/*.yaml` del contrato |
+| `pandas` | `3.0.5` | runtime/datos | manipulación tabular de manifests y splits; la requiere SPL-001 |
+| `pytest` | `9.1.1` | pruebas | runner gobernante: es el que ejecuta la suite que cierra un gate |
 
-Las transitivas —`torch`, `torchvision`, `opencv`, `matplotlib`, `scipy`, `pandas` y
-demás— las resuelve pip. No se pinean a mano: volcar un `pip freeze` completo congelaría
-árboles que nadie declaró y volvería ilegible cualquier cambio real.
+`pytest` es una dependencia **directa**, no de desarrollo aparte. El proceso de validación
+gobernante lo invoca explícitamente, y ENV-001 fijó un mecanismo único para todo el
+equipo: no se introduce `requirements-dev.txt` ni ningún gestor en paralelo.
+
+Las transitivas —`torch`, `torchvision`, `opencv`, `matplotlib`, `scipy`, `tzdata`,
+`colorama`, `iniconfig`, `pluggy`, `Pygments` y demás— las resuelve pip. No se pinean a
+mano: volcar un `pip freeze` completo congelaría árboles que nadie declaró y volvería
+ilegible cualquier cambio real.
 
 `requests` **no** se incluye. El contrato de scraping es *stdlib-first*: la adquisición se
 implementa con la biblioteca estándar.
