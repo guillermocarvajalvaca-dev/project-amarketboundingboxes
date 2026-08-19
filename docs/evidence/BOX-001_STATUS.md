@@ -257,3 +257,36 @@ SPL-001 queda formalmente entregado con alcance técnico completo
 (sintéticos). Pendiente: aprobación de Monserrat, y más adelante,
 cuando O-001 se resuelva y Monserrat ejecute el crawl completo,
 re-ejecutar el split final sobre el dataset real.
+
+## SPL-001 — Hallazgos de Monserrat resueltos (commit b39bb02)
+Monserrat encontró 2 hallazgos reales en PR #23:
+1. _build_groups no incluía source_asset_id explícitamente en la
+   unión de grupos (dependía implícitamente de sku_id). FIX: unión
+   explícita + 2 tests nuevos (exclusividad directa de source_asset_id,
+   y caso borde de sku_id con distinto duplicate_group_id).
+2. configs/dataset.yaml tenía PENDING_O_007 desactualizado. FIX:
+   actualizado con LIVE_DECISION_REGISTER.md — redistribution =
+   REDISTRIBUTION_PROHIBITED (LD-003), final_dataset_size =
+   UNKNOWN_PENDING_CRAWL_COMPLETION (LD-001, política cerrada,
+   número real pendiente del crawl).
+
+10/10 tests en verde. Comentario publicado en PR #23, esperando nueva
+revisión de Monserrat.
+
+DATO IMPORTANTE descubierto al buscar O-007: LIVE_DECISION_REGISTER.md
+(fusionado via GOV-002/PR#22) confirma que O-001 TAMBIÉN está resuelto
+como política (LD-001: "todos los activos únicos ACCEPTED"), aunque
+el número real de imágenes sigue UNKNOWN hasta el crawl completo.
+
+## Nueva tarea asignada — issue #24 (BOX-EV-001)
+Guillermo asignó registro de evidencia de BOX-001 en el ledger vivo
+(ADR-003). Rama: docs/andres/BOX-EV-001-register-evidence (desde main
+actualizado). Alcance SOLO documental:
+- crear docs/evidence/2026-08-19_BOX-001_implementation_validation.md
+- añadir fila EV-G3-BOX-001 en docs/evidence/EVIDENCE_LEDGER.csv
+- registrar PR #18, commit final, merge commit, revisión de Monserrat,
+  19/19 tests
+- declarar EXPLÍCITAMENTE real_dataset_execution = NOT_RUN y
+  overall_G3_status = PARTIAL (NO declarar G3 completo)
+- NO modificar código, tests, configs, ni documentos FROZEN
+Reviewer: Monserrat. Estado: NO INICIADO — próximo paso al retomar.
