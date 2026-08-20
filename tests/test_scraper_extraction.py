@@ -1181,6 +1181,118 @@ class TestScraperExtraction(unittest.TestCase):
                 1,
             )
 
+    def test_reconcile_ignores_non_managed_auxiliary_file(self):
+        """desktop.ini y otros archivos no-imagen no cuentan en image_files."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            images_dir = Path(temp_dir) / "images"
+
+            image_bytes = b"imagen-administrada-unica"
+
+            managed_path = images_dir / "sku_a.jpg"
+
+            save_image_idempotently(
+                managed_path,
+                image_bytes,
+            )
+
+            auxiliary_path = images_dir / "desktop.ini"
+
+            auxiliary_path.write_bytes(
+                b"[.ShellClassInfo]\r\n"
+                b"IconResource=C:\\Windows\\System32.dll,-235\r\n"
+            )
+
+            manifest_rows = [
+                {
+                    "source_asset_id": "asset-a",
+                    "sha256": calculate_sha256(
+                        image_bytes
+                    ),
+                    "local_path": str(managed_path),
+                }
+            ]
+
+            summary = reconcile_outputs(
+                manifest_rows,
+                [],
+                images_dir,
+            )
+
+            self.assertEqual(summary["accepted"], 1)
+            self.assertEqual(summary["image_files"], 1)
+            self.assertEqual(summary["manifest_rows"], 1)
+            self.assertEqual(summary["rejected"], 0)
+            self.assertEqual(summary["attempted"], 1)
+
+    def test_reconcile_still_detects_orphan_managed_image(self):
+        """Una imagen administrada huérfana real sigue provocando fallo."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            images_dir = Path(temp_dir) / "images"
+
+            save_image_idempotently(
+                images_dir / "sku_a.jpg",
+                b"imagen-administrada-a",
+            )
+
+            save_image_idempotently(
+                images_dir / "sku_b.jpg",
+                b"imagen-administrada-b",
+            )
+
+            manifest_rows = [
+                {
+                    "source_asset_id": "asset-a",
+                    "sha256": calculate_sha256(
+                        b"imagen-administrada-a"
+                    ),
+                    "local_path": str(
+                        images_dir / "sku_a.jpg"
+                    ),
+                }
+            ]
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Reconciliaci\u00f3n inv\u00e1lida",
+            ):
+                reconcile_outputs(
+                    manifest_rows,
+                    [],
+                    images_dir,
+                )
+
+    def test_reconcile_still_detects_missing_managed_image(self):
+        """Una fila aceptada sin imagen administrada real sigue fallando."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            images_dir = Path(temp_dir) / "images"
+
+            images_dir.mkdir(parents=True)
+
+            manifest_rows = [
+                {
+                    "source_asset_id": "asset-a",
+                    "sha256": calculate_sha256(
+                        b"imagen-nunca-guardada"
+                    ),
+                    "local_path": str(
+                        images_dir / "sku_a.jpg"
+                    ),
+                }
+            ]
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Reconciliaci\u00f3n inv\u00e1lida",
+            ):
+                reconcile_outputs(
+                    manifest_rows,
+                    [],
+                    images_dir,
+                )
+
     def test_smoke_and_full_crawl_are_mutually_exclusive(self):
         """--smoke-test y --full-crawl no pueden usarse juntos."""
 
