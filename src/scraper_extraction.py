@@ -79,6 +79,22 @@ REJECTION_FIELDS = [
     "rejection_reason",
 ]
 
+IMAGE_FORMAT_EXTENSIONS = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "WEBP": ".webp",
+}
+
+IMAGE_MIME_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+MANAGED_IMAGE_EXTENSIONS = frozenset(
+    IMAGE_FORMAT_EXTENSIONS.values()
+)
+
 
 class CollectionParser(HTMLParser):
     """Extrae enlaces de producto desde la colección."""
@@ -965,6 +981,8 @@ def reconcile_outputs(
             for path
             in images_dir.iterdir()
             if path.is_file()
+            and path.suffix.lower()
+            in MANAGED_IMAGE_EXTENSIONS
         ]
     else:
         image_files = []
@@ -1302,27 +1320,15 @@ def extension_from_image(
         or ""
     ).upper()
 
-    mapping = {
-        "JPEG": ".jpg",
-        "PNG": ".png",
-        "WEBP": ".webp",
-    }
-
-    extension = mapping.get(
+    extension = IMAGE_FORMAT_EXTENSIONS.get(
         image_format
     )
 
     if extension:
         return extension
 
-    mime_mapping = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-    }
-
-    if content_type in mime_mapping:
-        return mime_mapping[
+    if content_type in IMAGE_MIME_EXTENSIONS:
+        return IMAGE_MIME_EXTENSIONS[
             content_type
         ]
 
