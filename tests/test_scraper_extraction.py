@@ -1666,6 +1666,197 @@ class TestScraperExtraction(unittest.TestCase):
                 expected_urls,
             )
 
+    def test_full_crawl_rejection_is_idempotent_across_runs(self):
+        """Full crawl: un rechazo repetido no debe duplicarse ni inflar conteos."""
+
+        collection_url = (
+            "https://amarket.com.bo/collections/lo-nuevo"
+        )
+        robots_url = "https://amarket.com.bo/robots.txt"
+
+        accepted_product_url = (
+            "https://amarket.com.bo/products/producto-1"
+        )
+        rejected_product_url = (
+            "https://amarket.com.bo/products/producto-2"
+        )
+
+        accepted_image_url = (
+            "https://amarket.com.bo/cdn/shop/files/"
+            "producto-1.png"
+        )
+        rejected_image_url = (
+            "https://amarket.com.bo/cdn/shop/files/"
+            "producto-2.png"
+        )
+
+        collection_html = (
+            "<html><body>"
+            '<a href="/products/producto-1">Producto 1</a>'
+            '<a href="/products/producto-2">Producto 2</a>'
+            "</body></html>"
+        ).encode("utf-8")
+
+        accepted_product_html = (
+            "<html><head>"
+            "<title>Producto 1 — Amarket</title>"
+            '<meta property="og:title" content="Producto 1">'
+            '<meta property="og:description" '
+            'content="Descripcion 1">'
+            '<meta property="og:image:secure_url" '
+            f'content="{accepted_image_url}">'
+            "</head><body></body></html>"
+        ).encode("utf-8")
+
+        rejected_product_html = (
+            "<html><head>"
+            "<title>Producto 2 — Amarket</title>"
+            '<meta property="og:title" content="Producto 2">'
+            '<meta property="og:description" '
+            'content="Descripcion 2">'
+            '<meta property="og:image:secure_url" '
+            f'content="{rejected_image_url}">'
+            "</head><body></body></html>"
+        ).encode("utf-8")
+
+        accepted_image_bytes = _make_test_image_bytes(
+            (20, 20, 20)
+        )
+
+        responses = {
+            robots_url: (
+                200,
+                "text/plain",
+                b"User-agent: *\nAllow: /\n",
+            ),
+            collection_url: (
+                200,
+                "text/html",
+                collection_html,
+            ),
+            accepted_product_url: (
+                200,
+                "text/html",
+                accepted_product_html,
+            ),
+            rejected_product_url: (
+                200,
+                "text/html",
+                rejected_product_html,
+            ),
+            accepted_image_url: (
+                200,
+                "image/png",
+                accepted_image_bytes,
+            ),
+            rejected_image_url: (
+                200,
+                "text/plain",
+                b"esto-no-es-una-imagen",
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            config = _build_fixture_config(
+                root,
+                collection_url,
+            )
+
+            with _patch_amarket_network(responses):
+                first_summary = run_full_crawl(config)
+
+            first_rejection_rows = read_csv_rows(
+                config["outputs"]["rejects"]
+            )
+
+            self.assertEqual(
+                first_summary["accepted"],
+                1,
+            )
+
+            self.assertEqual(
+                first_summary["rejected"],
+                1,
+            )
+
+            self.assertEqual(
+                len(first_rejection_rows),
+                1,
+            )
+
+            with _patch_amarket_network(responses):
+                second_summary = run_full_crawl(config)
+
+            second_rejection_rows = read_csv_rows(
+                config["outputs"]["rejects"]
+            )
+
+            second_manifest_rows = read_csv_rows(
+                config["outputs"]["manifest"]
+            )
+
+            self.assertEqual(
+                second_summary["accepted"],
+                1,
+            )
+
+            self.assertEqual(
+                second_summary["accepted_this_run"],
+                0,
+            )
+
+            self.assertEqual(
+                len(second_manifest_rows),
+                1,
+            )
+
+            self.assertEqual(
+                second_summary["rejected"],
+                1,
+                "La segunda corrida no debe inflar "
+                "el conteo de rechazos.",
+            )
+
+            self.assertEqual(
+                second_summary["rejected_this_run"],
+                0,
+                "Un rechazo ya registrado no debe "
+                "contarse otra vez en la misma forma.",
+            )
+
+            self.assertEqual(
+                len(second_rejection_rows),
+                1,
+                "rejects.csv no debe duplicar el mismo "
+                "rechazo entre corridas idénticas.",
+            )
+
+            self.assertEqual(
+                second_rejection_rows[0][
+                    "product_page_url"
+                ],
+                first_rejection_rows[0][
+                    "product_page_url"
+                ],
+            )
+
+            self.assertEqual(
+                second_rejection_rows[0][
+                    "rejection_reason"
+                ],
+                first_rejection_rows[0][
+                    "rejection_reason"
+                ],
+            )
+
+            self.assertEqual(
+                second_summary["attempted"],
+                second_summary["accepted"]
+                + second_summary["rejected"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

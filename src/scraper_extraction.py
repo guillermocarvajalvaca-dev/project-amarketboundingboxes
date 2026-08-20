@@ -1350,6 +1350,22 @@ def make_rejection(
     }
 
 
+def rejection_identity_key(
+    product_page_url,
+    image_url,
+    reason,
+):
+    """Identidad estable de un rechazo, ignorando timestamp/run_id."""
+
+    return "|".join(
+        (
+            product_page_url or "",
+            image_url or "",
+            reason,
+        )
+    )
+
+
 def run_smoke_test(
     config,
     limit,
@@ -1932,6 +1948,15 @@ def run_full_crawl(config):
         previous_rejections
     )
 
+    existing_rejection_keys = {
+        rejection_identity_key(
+            row.get("product_page_url", ""),
+            row.get("image_url", ""),
+            row.get("rejection_reason", ""),
+        )
+        for row in previous_rejections
+    }
+
     accepted_this_run = 0
     rejected_this_run = 0
 
@@ -2165,16 +2190,27 @@ def run_full_crawl(config):
                 f"{error}"
             )
 
-            rejection_rows.append(
-                make_rejection(
-                    product_url,
-                    image_url,
-                    run_id,
-                    reason,
-                )
+            rejection_key = rejection_identity_key(
+                product_url,
+                image_url,
+                reason,
             )
 
-            rejected_this_run += 1
+            if rejection_key not in existing_rejection_keys:
+                rejection_rows.append(
+                    make_rejection(
+                        product_url,
+                        image_url,
+                        run_id,
+                        reason,
+                    )
+                )
+
+                existing_rejection_keys.add(
+                    rejection_key
+                )
+
+                rejected_this_run += 1
 
             print(
                 "      REJECTED "
