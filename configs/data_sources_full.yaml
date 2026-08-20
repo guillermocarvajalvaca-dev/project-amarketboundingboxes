@@ -1,0 +1,23 @@
+source:
+  name: AMARKET
+  collection_url: https://amarket.com.bo/collections/lo-nuevo
+
+http:
+  user_agent: PROJECT_AMARKETBOUNDINGBOXES/1.0 academic-full-crawl
+  delay_seconds: 1.0
+  timeout_seconds: 20
+  max_retries: 3
+  backoff_seconds: 2.0
+
+limits:
+  max_images_per_product: 1
+  max_image_bytes: 5242880
+
+rights:
+  status: REDISTRIBUTION_PROHIBITED
+
+outputs:
+  images_dir: data/raw/amarket_full
+  manifest: data/manifests/source_assets_full.csv
+  rejects: data/manifests/scrape_rejections_full.csv
+  summary: outputs/scrape_summary_full.json
