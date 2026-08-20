@@ -148,6 +148,19 @@ class TestSmokeTrainYEvaluate(unittest.TestCase):
         self.assertEqual(metrics_a["metricas"], metrics_b["metricas"],
                           "la evaluacion repetida sobre el mismo peso debe coincidir")
 
+        # issue #15 (punto 1 y 3): n_imagenes no puede salir de resultado.box.nc
+        # (numero de clases, no de imagenes) y hay que confirmar que se
+        # encontraron ground truths reales -- no basta con que existan archivos
+        # de salida. El fixture de val tiene 4 imagenes (generate_fixture.py
+        # default --n-val 4), cada una con exactamente 1 caja por contrato.
+        for metrics in (metrics_a, metrics_b):
+            self.assertEqual(metrics["n_imagenes"], 4,
+                              "el split val del fixture tiene 4 imagenes")
+            self.assertEqual(metrics["n_ground_truths"], 4,
+                              "cada imagen del fixture trae exactamente 1 caja (contrato de datos)")
+            self.assertGreater(metrics["n_ground_truths"], 0,
+                                "una evaluacion sin ground truth real no es valida")
+
         manifest_a = os.path.join(self.output_eval_a, "weight_manifest.json")
         manifest_b = os.path.join(self.output_eval_b, "weight_manifest.json")
         with open(manifest_a) as f:
@@ -156,9 +169,26 @@ class TestSmokeTrainYEvaluate(unittest.TestCase):
             hash_b = json.load(f)["sha256"]
         self.assertEqual(hash_a, hash_b, "el hash del mismo peso debe ser identico entre corridas")
 
-        for output_dir in (self.output_eval_a, self.output_eval_b):
-            self.assertTrue(os.path.isfile(os.path.join(output_dir, "error_examples.csv")))
-            self.assertTrue(os.path.isfile(os.path.join(output_dir, "predictions", "predictions.json")))
+        # issue #15 (punto 4): antes solo se comprobaba que los archivos
+        # existieran. Verificado empiricamente (misma maquina, mismo peso,
+        # sin augmentacion) que predictions.json y error_examples.csv son
+        # tambien identicos byte a byte entre corridas -- se compara el
+        # contenido completo, no solo la existencia. metrics.json ya
+        # documenta que esta garantia es "misma maquina", no entre SO/hardware
+        # distintos.
+        with open(os.path.join(self.output_eval_a, "predictions", "predictions.json")) as f:
+            predicciones_a = f.read()
+        with open(os.path.join(self.output_eval_b, "predictions", "predictions.json")) as f:
+            predicciones_b = f.read()
+        self.assertEqual(predicciones_a, predicciones_b,
+                          "predictions.json debe ser identico entre corridas en la misma maquina")
+
+        with open(os.path.join(self.output_eval_a, "error_examples.csv")) as f:
+            errores_a = f.read()
+        with open(os.path.join(self.output_eval_b, "error_examples.csv")) as f:
+            errores_b = f.read()
+        self.assertEqual(errores_a, errores_b,
+                          "error_examples.csv debe ser identico entre corridas en la misma maquina")
 
 
 if __name__ == "__main__":
