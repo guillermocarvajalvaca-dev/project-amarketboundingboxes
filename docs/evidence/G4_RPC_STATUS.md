@@ -15,10 +15,21 @@ para permitir la comparación A vs. B que cierra G4.
   congela el Experimento A (SHA-256 confirmado coincidente con
   `EV-G4-001`) y autoriza explícitamente el Experimento B
   (AMARKET+RPC en train, AMARKET-only en val/test), `NEXT=PABLO_G4_RPC_RUN`.
-- La prohibición de usar RPC como dataset central no aplica a este
-  Experimento B: RPC se utilizó únicamente como corpus auxiliar de
-  entrenamiento; el dataset canónico del proyecto, `val` y `test` permanecen
-  AMARKET. No se modifica el contrato FROZEN.
+- Durante la revisión posterior a la ejecución se detectó una contradicción
+  documental dentro del paquete de gobernanza FROZEN. El
+  `CONTRACT_SDD_v1_0_0_FROZEN.md` prohíbe introducir RPC como dataset central
+  sin un cambio contractual aprobado, mientras `docs/governance/README.md`
+  establece de forma más restrictiva que RPC puede citarse únicamente como
+  antecedente científico. `DOCUMENT_AUTHORITY.md` no contiene una resolución
+  específica que permita considerar ese README como superado por el SDD.
+- Por tanto, no se infiere una precedencia inexistente ni se modifica
+  retroactivamente el contrato FROZEN. Se aplica una resolución conservadora:
+  el Experimento B se conserva como evidencia de una ejecución técnica
+  realizada, pero se excluye de la evidencia gobernante utilizada para cerrar
+  G4.
+- El Experimento B no modificó el dataset canónico, los splits ni
+  `configs/dataset.yaml`; `val` permaneció AMARKET-only y `test` no fue
+  consultado.
 - `test` permanece bloqueado; no se desbloquea hasta que el coordinador
   cierre G4 formalmente comparando A vs. B (según su propia instrucción).
 
@@ -126,8 +137,14 @@ decisión de cierre de G4 con base en esta comparación.
 
 ## Estado
 
-`G4_RPC_TRAINING=PASS`. Queda pendiente de revisión independiente del
-coordinador. Con Experimento A (`EV-G4-001`) y Experimento B (`EV-G4-002`)
-registrados, corresponde al coordinador comparar A vs. B y cerrar G4
-formalmente (`NEXT=FREEZE_G4_AND_PREPARE_RPC_RUN` original, ahora con ambos
-experimentos disponibles), antes de desbloquear `test` para G5.
+`G4_RPC_TRAINING=EXECUTED`.
+
+La ejecución técnica finalizó correctamente, pero tras detectar la contradicción
+documental descrita arriba el Experimento B queda clasificado como
+**no gobernante** y no se utiliza para satisfacer ni cerrar G4.
+
+El cierre de G4 se realizará exclusivamente con el Experimento A
+(`EV-G4-001`, AMARKET-only), que permanece congelado como modelo seleccionado.
+El Experimento B se conserva para trazabilidad del contratiempo, comparación
+experimental y eventual reconciliación futura de la documentación de
+gobernanza.
