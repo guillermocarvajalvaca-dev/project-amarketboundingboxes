@@ -161,7 +161,7 @@ Puntos 1-5 completos. Punto 6 (pandas como dependencia) depende de
 ENV-002 (issue #25), no es acción propia. Falta punto 7: re-ejecutar
 checklist completo y publicar evidencia final en el PR.
 
-## SPL-001 ??? Ejecuci??n real final (2026-08-21)
+## SPL-001 — Ejecución real final (2026-08-21)
 
 Estado:
 - implementation_status: PASSED_ON_REAL_DATASET
@@ -192,5 +192,5 @@ Trazabilidad:
 - parameters_hash: 87f64e55aa7b63804c03badb8d3cf038c7f8a2bdff322bf6a983acd6697d72a0
 
 Nota:
-- El corpus auxiliar RPC no modifica el split can??nico AMARKET de SPL-001.
-- El test AMARKET queda bloqueado para evaluaci??n final.
+- El corpus auxiliar RPC no modifica el split canónico AMARKET de SPL-001.
+- El test AMARKET queda bloqueado para evaluación final.

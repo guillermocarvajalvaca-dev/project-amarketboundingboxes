@@ -47,7 +47,7 @@ quality_rules:
   rejected_items_have_reason: MUST_PASS
   background_mode_acceptable: MUST_PASS
   bbox_tests_T01_T10: MUST_PASS
-  # O-001: todos los activos ??nicos ACCEPTED; conteo real AMARKET = 655
+  # O-001: todos los activos únicos ACCEPTED; conteo real AMARKET = 655
   final_dataset_size: 655  # AMARKET ACCEPTED real
 
 publication:
