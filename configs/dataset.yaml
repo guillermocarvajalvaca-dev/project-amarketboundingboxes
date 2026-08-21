@@ -1,0 +1,75 @@
+# Ultralytics YOLO dataset descriptor.
+# Dataset fisico externo montado/junctionado en esta ruta relativa.
+path: data/processed/amarket_yolo
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: product
+# configs/dataset.yaml
+# Configuración del dataset BOX-001/SPL-001 — Andres Poiche
+# Fuente: docs/governance/02_CONTRACTS/BOUNDING_BOX_ALGORITHM_CONTRACT.md
+#         docs/governance/02_CONTRACTS/DATA_AND_SPLIT_CONTRACT.yaml
+#
+# Los valores marcados PENDING_* NO son defaults: son placeholders
+# explícitos a la espera de resolución de gobernanza (ver
+# docs/evidence/BOX-001_STATUS.md). No ejecutar el pipeline real con
+# estos valores.
+
+algorithm:
+  # BOUNDING_BOX_ALGORITHM_CONTRACT.md §3 — bloqueados en PENDING_G3_PILOT
+  alpha_threshold: 127
+  background_uniformity_tolerance: 5.0
+  foreground_delta: 30.0
+  min_foreground_pixels: 10
+
+  # Fijado en contrato, no configurable (no reinventar)
+  class_id: 0
+  yolo_decimals: 6
+  bbox_edges: semi_open  # x_max + 1, y_max + 1
+
+split_policy:
+  # DATA_AND_SPLIT_CONTRACT.yaml §split_policy
+  # RESUELTO por decisión O-002 del coordinador (16/08/2026)
+  fixed_seed: 42
+  ratios:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+
+  # Fijado en contrato, ya implementado en make_splits.py
+  group_exclusivity:
+    - sku_id
+    - source_asset_id
+    - duplicate_group_id
+  class_rule: "class_id 0 must be represented in every non-empty split"
+  test_lock: true  # ver duda abierta en BOX-001_STATUS.md
+
+quality_rules:
+  accepted_images_decode: MUST_PASS
+  exact_duplicates_resolved: MUST_PASS
+  invalid_boxes: 0
+  orphan_labels: 0
+  orphan_images: 0
+  cross_split_group_violations: 0
+  rejected_items_have_reason: MUST_PASS
+  background_mode_acceptable: MUST_PASS
+  bbox_tests_T01_T10: MUST_PASS
+  # O-001: todos los activos únicos ACCEPTED; conteo real AMARKET = 655
+  final_dataset_size: 655  # AMARKET ACCEPTED real
+
+publication:
+  external_location: GOOGLE_DRIVE_PROJECT_FOLDER
+  redistribution: REDISTRIBUTION_PROHIBITED  # Decision LD-003, cierra O-007 (16/08/2026)
+
+manifest:
+  required_fields:
+    - source_asset_id
+    - sku_id
+    - class_id
+    - image_path
+    - label_path
+    - box_algorithm_version
+    - parameters_hash
+    - source_sha256
