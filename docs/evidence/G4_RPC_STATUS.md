@@ -15,11 +15,10 @@ para permitir la comparación A vs. B que cierra G4.
   congela el Experimento A (SHA-256 confirmado coincidente con
   `EV-G4-001`) y autoriza explícitamente el Experimento B
   (AMARKET+RPC en train, AMARKET-only en val/test), `NEXT=PABLO_G4_RPC_RUN`.
-- Condición contractual verificada antes de ejecutar: el `MUST NOT` de
-  `docs/governance/00_GOVERNANCE/CONTRACT_SDD_v1_0_0_FROZEN.md` que prohíbe
-  usar RPC como dataset central es condicional ("sin un cambio contractual
-  aprobado"); la autorización del coordinador arriba citada satisface esa
-  condición exclusivamente para este Experimento B.
+- La prohibición de usar RPC como dataset central no aplica a este
+  Experimento B: RPC se utilizó únicamente como corpus auxiliar de
+  entrenamiento; el dataset canónico del proyecto, `val` y `test` permanecen
+  AMARKET. No se modifica el contrato FROZEN.
 - `test` permanece bloqueado; no se desbloquea hasta que el coordinador
   cierre G4 formalmente comparando A vs. B (según su propia instrucción).
 
