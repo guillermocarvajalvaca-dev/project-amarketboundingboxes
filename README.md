@@ -1,60 +1,123 @@
 # Project AmarketBoundingBoxes
 
-Proyecto final de MCI-509, Procesamiento de Imágenes y Visión Computacional,
-Universidad Católica Boliviana "San Pablo", Sede Santa Cruz.
-
-## Estado
-
-`G1_BOOTSTRAP`
-
-El repositorio contiene únicamente el paquete gobernante y el andamiaje
-estructural. La existencia de un archivo o de una carpeta no prueba
-implementación, ejecución ni cumplimiento.
+Proyecto final de **MCI-509 — Procesamiento de Imágenes y Visión Computacional** de la Universidad Católica Boliviana "San Pablo", Sede Santa Cruz.
 
 ## Objetivo
 
-Construir un dataset propio de imágenes públicas de productos de Amarket,
-localizar automáticamente los píxeles extremos del producto aislado y producir
-anotaciones de detección en formato YOLO.
-
-El dataset es **monoclase**:
+Construir un dataset propio de productos públicos de AMARKET, generar bounding boxes YOLO y entrenar un detector monoclase:
 
 ```yaml
 names:
   0: product
 ```
 
-El SKU, el nombre y la descripción son **metadatos de procedencia; no son
-clases**. Checkout, identificación fine-grained del SKU, escenas multiproducto
-y RPC como dataset objetivo quedan fuera del alcance.
+SKU y descripción son metadatos de procedencia, no clases.
 
-## Documentos gobernantes
+## Estado
 
-Están en [`docs/governance/`](docs/governance/), validados contra
-`docs/governance/MANIFEST.sha256`. Orden de lectura y reglas de colaboración en
-[`docs/governance/README.md`](docs/governance/README.md).
+G0–G5: **PASS**. G6: **en cierre**.
 
-| Documento | Ruta |
-|---|---|
-| Contrato SDD (FROZEN) | `docs/governance/00_GOVERNANCE/CONTRACT_SDD_v1_0_0_FROZEN.md` |
-| ADR-001 autoridad de gate | `docs/governance/00_GOVERNANCE/ADR-001_COORDINATOR_GATE_AUTHORITY.md` |
-| Manual operativo (FROZEN) | `docs/governance/01_PLANNING/OPERATING_MANUAL_v1_0_0_FROZEN.md` |
-| Cierre de G0 | `docs/governance/06_AUDIT/G0_CLOSURE_20260816.md` |
+Dataset canónico AMARKET: 655 imágenes aceptadas, con splits reproducibles `459/98/98` para train/val/test, seed `42`, sin cruces de SKU, source asset ni duplicate group.
 
-## Estado de implementación
+Las imágenes y los pesos no se versionan en GitHub. El dataset congelado permanece en Drive privado:
+https://drive.google.com/drive/folders/1o4U-ehe1_WbZpye-W5J44YLLEUnAhAS9
 
-| Componente | Estado |
-|---|---|
-| Scraper de extracción | `NOT IMPLEMENTED` |
-| Generación de bounding boxes | `NOT IMPLEMENTED` |
-| Splits del dataset | `NOT IMPLEMENTED` |
-| Entrenamiento, evaluación y predicción | `NOT IMPLEMENTED` |
-| Entorno reproducible | `NOT SELECTED` — pendiente en el issue `ENV-001` |
+La ubicación local esperada coincide con `configs/dataset.yaml`:
 
-No hay dependencias declaradas todavía: la elección de un mecanismo único de
-entorno es una decisión abierta de G1.
+```text
+data/processed/amarket_yolo/
+  images/train
+  images/val
+  images/test
+  labels/train
+  labels/val
+  labels/test
+```
 
-## Contribuir
+## Entorno
 
-Lee [`CONTRIBUTING.md`](CONTRIBUTING.md) antes de abrir una rama. Cada artefacto
-tiene un autor y un revisor distinto; nadie aprueba su propio PR.
+Versión gobernante: Python 3.11.9. Las dependencias directas están fijadas en `requirements.txt`.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+## Modelo final
+
+Modelo gobernante: **Experimento A — AMARKET-only, YOLO11n**.
+
+Peso:
+`amarket_yolo11n_g4_A_best.pt`
+
+SHA-256:
+`9149dfef3093ca12a80fbb85b860822ae52d6ca5d8e2f1a6224211f92acd6712`
+
+Drive privado:
+https://drive.google.com/file/d/1-laF__DIdTW8Geq8Xc57ni6NdMsCvV52/view?usp=drivesdk
+
+Guardar el peso localmente en:
+
+```text
+outputs/demo_model/amarket_yolo11n_g4_A_best.pt
+```
+
+## Resultados finales sobre test AMARKET
+
+| Métrica | Valor |
+|---|---:|
+| Precision | 1.000000 |
+| Recall | 1.000000 |
+| F1 | 1.000000 |
+| mAP@0.5 | 0.995000 |
+| mAP@0.75 | 0.995000 |
+| mAP@0.5:0.95 | 0.992875 |
+
+El test congelado contiene 98 imágenes y 98 ground truths. Dos evaluaciones del mismo peso produjeron métricas idénticas. No hubo tuning posterior sobre test.
+
+El protocolo produjo 15 casos correctos seleccionados y 0 errores naturales a `conf=0.25` e `IoU=0.5`; no se modificaron umbrales para fabricar errores.
+
+## Inferencia CPU
+
+```powershell
+.\.venv\Scripts\python.exe src\predict.py --model outputs\demo_model\amarket_yolo11n_g4_A_best.pt --input data\processed\amarket_yolo\images\test --device cpu --output-dir outputs\predictions\demo --conf 0.25 --limit 5
+```
+
+Outputs: `predictions.json`, `timing_summary.json` y `annotated/`.
+
+## Notebook obligatorio
+
+Abrir `notebooks/inferencia_cpu.ipynb` y ejecutar **Restart Kernel / Run All**.
+
+El notebook verifica el SHA-256, carga explícitamente con `torch.load(..., map_location="cpu")`, fuerza `device="cpu"`, procesa cinco imágenes determinísticas y muestra las detecciones dentro del notebook.
+
+## Evaluación reproducible
+
+```powershell
+.\.venv\Scripts\python.exe src\evaluate.py --model outputs\demo_model\amarket_yolo11n_g4_A_best.pt --data configs\dataset.yaml --split test --output-dir outputs\evaluation\reproduction --conf 0.25 --iou-umbral 0.5 --device cpu --allow-test
+```
+
+## Entrenamiento reproducible
+
+```powershell
+.\.venv\Scripts\python.exe src\train.py --config configs\baseline.yaml --data configs\dataset.yaml --output-dir outputs\runs\reproduction --seed 42
+```
+
+El flujo contractual es train → selección con val → congelación de peso/config → test.
+
+## Pipeline
+
+`src/scraper_extraction.py` → `src/data/make_boxes.py` → `src/data/make_splits.py` → `src/train.py` → `src/evaluate.py` → `src/predict.py` → `notebooks/inferencia_cpu.ipynb`
+
+`src/common/reproducibility.py` concentra semillas, fingerprint canónico de configuración y SHA-256 de artefactos.
+
+## Equipo
+
+- Monserrat Barba: adquisición y validación.
+- Andrés Poiche: bounding boxes, dataset y splits.
+- Pablo Linares: entrenamiento y evaluación.
+- Guillermo Carvajal Vaca: coordinación, integración, reproducibilidad, inferencia CPU, informe y defensa.
+
+Los artefactos se integran mediante Pull Request con revisión independiente.
