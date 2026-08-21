@@ -94,6 +94,7 @@ def ejecutar_inferencia(
     *,
     device: str = "cpu",
     conf: float = 0.25,
+    limit: int | None = None,
     overwrite: bool = False,
 ) -> dict:
     """Ejecuta inferencia y guarda outputs reproducibles de presentación."""
@@ -106,6 +107,12 @@ def ejecutar_inferencia(
         raise ValueError("--conf debe estar entre 0 y 1")
 
     imagenes = resolver_imagenes(input_path)
+
+    if limit is not None:
+        if limit <= 0:
+            raise ValueError("--limit debe ser mayor que 0")
+        imagenes = imagenes[:limit]
+
     preparar_output(output_dir, overwrite)
 
     from ultralytics import YOLO
@@ -250,6 +257,12 @@ def main() -> None:
         help="Umbral de confianza",
     )
     parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="M?ximo de im?genes a procesar; debe ser mayor que 0",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Permite reemplazar explícitamente un output existente",
@@ -264,6 +277,7 @@ def main() -> None:
             args.output_dir,
             device=args.device,
             conf=args.conf,
+            limit=args.limit,
             overwrite=args.overwrite,
         )
     except Exception as exc:
