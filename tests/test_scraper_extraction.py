@@ -18,6 +18,9 @@ from src.scraper_extraction import (
     atomic_write_csv,
     atomic_write_json,
     calculate_sha256,
+    check_robots,
+    discover_all_product_urls,
+    extract_next_collection_url,
     duplicate_group_id,
     load_config,
     main,
@@ -150,6 +153,59 @@ def _patch_amarket_network(responses):
         "src.scraper_extraction.request_with_retries",
         side_effect=_side_effect,
     )
+
+
+def _build_paginated_collection_fixture():
+    """Colección de 3 páginas con productos repetidos entre páginas.
+
+    Página 1: A, B, link a página 2.
+    Página 2: B repetido, C, link a página 3.
+    Página 3: D, sin siguiente.
+    Resultado esperado: 3 páginas, productos únicos A, B, C, D.
+    """
+
+    base_url = "https://amarket.com.bo/collections/lo-nuevo"
+    page2_url = f"{base_url}?page=2"
+    page3_url = f"{base_url}?page=3"
+    robots_url = "https://amarket.com.bo/robots.txt"
+
+    page1_html = (
+        "<html><body>"
+        '<a href="/products/producto-a">Producto A</a>'
+        '<a href="/products/producto-b">Producto B</a>'
+        f'<a href="{page2_url}">Siguiente</a>'
+        "</body></html>"
+    ).encode("utf-8")
+
+    page2_html = (
+        "<html><body>"
+        '<a href="/products/producto-b">Producto B repetido</a>'
+        '<a href="/products/producto-c">Producto C</a>'
+        f'<a href="{base_url}">Anterior</a>'
+        f'<a href="{page3_url}">Siguiente</a>'
+        "</body></html>"
+    ).encode("utf-8")
+
+    page3_html = (
+        "<html><body>"
+        '<a href="/products/producto-d">Producto D</a>'
+        f'<a href="{page2_url}">Anterior</a>'
+        "</body></html>"
+    ).encode("utf-8")
+
+    responses = {
+        robots_url: (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+        base_url: (200, "text/html", page1_html),
+        page2_url: (200, "text/html", page2_html),
+        page3_url: (200, "text/html", page3_html),
+    }
+
+    expected_urls = sorted(
+        f"https://amarket.com.bo/products/producto-{letter}"
+        for letter in ("a", "b", "c", "d")
+    )
+
+    return base_url, responses, expected_urls
 
 
 def _build_fixture_config(root, collection_url, extra_limits=None):
@@ -1968,6 +2024,131 @@ class TestScraperExtraction(unittest.TestCase):
                 second_summary["accepted"]
                 + second_summary["rejected"],
             )
+
+
+    def test_discover_all_product_urls_paginates_and_deduplicates(self):
+        """Recorre 3 páginas de colección, deduplica global y termina
+        sin next link, sin acceder realmente a AMARKET."""
+
+        base_url, responses, expected_urls = (
+            _build_paginated_collection_fixture()
+        )
+
+        config = {
+            "http": {
+                "user_agent": (
+                    "PROJECT_AMARKETBOUNDINGBOXES/1.0 test"
+                ),
+                "delay_seconds": 0,
+                "timeout_seconds": 20,
+                "max_retries": 3,
+                "backoff_seconds": 0,
+            }
+        }
+
+        client = PoliteHttpClient(config)
+
+        with _patch_amarket_network(responses):
+            robots_parser = check_robots(
+                client,
+                base_url,
+                base_url,
+            )
+
+            product_urls, collection_pages = (
+                discover_all_product_urls(
+                    client,
+                    robots_parser,
+                    base_url,
+                )
+            )
+
+        self.assertEqual(
+            collection_pages,
+            3,
+        )
+
+        self.assertEqual(
+            product_urls,
+            expected_urls,
+        )
+
+
+    def test_pagination_ignores_external_domain(self):
+        """No sigue paginación fuera del dominio contractual."""
+
+        base_url = (
+            "https://amarket.com.bo/collections/lo-nuevo"
+        )
+
+        html = (
+            "<html><body>"
+            '<a href="/products/producto-a">'
+            "Producto A"
+            "</a>"
+            '<a href="https://evil.example/'
+            'collections/lo-nuevo?page=2">'
+            "Siguiente"
+            "</a>"
+            "</body></html>"
+        ).encode("utf-8")
+
+        next_url = extract_next_collection_url(
+            html,
+            base_url,
+        )
+
+        self.assertIsNone(
+            next_url
+        )
+
+
+    def test_pagination_loop_fails_explicitly(self):
+        """Un loop debe fallar, no truncar silenciosamente."""
+
+        base_url, responses, _ = (
+            _build_paginated_collection_fixture()
+        )
+
+        config = {
+            "http": {
+                "user_agent": (
+                    "PROJECT_AMARKETBOUNDINGBOXES/1.0 test"
+                ),
+                "delay_seconds": 0,
+                "timeout_seconds": 20,
+                "max_retries": 3,
+                "backoff_seconds": 0,
+            }
+        }
+
+        client = PoliteHttpClient(
+            config
+        )
+
+        with _patch_amarket_network(
+            responses
+        ):
+            robots_parser = check_robots(
+                client,
+                base_url,
+                base_url,
+            )
+
+            with patch(
+                "src.scraper_extraction."
+                "extract_next_collection_url",
+                return_value=base_url,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "PAGINATION_LOOP_DETECTED",
+                ):
+                    discover_all_product_urls(
+                        client,
+                        robots_parser,
+                        base_url,
+                    )
 
 
 if __name__ == "__main__":

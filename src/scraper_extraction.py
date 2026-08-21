@@ -21,7 +21,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
 
@@ -97,11 +97,12 @@ MANAGED_IMAGE_EXTENSIONS = frozenset(
 
 
 class CollectionParser(HTMLParser):
-    """Extrae enlaces de producto desde la colección."""
+    """Extrae enlaces de producto y de paginación desde la colección."""
 
     def __init__(self):
         super().__init__()
         self.product_links = []
+        self.pagination_links = []
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() != "a":
@@ -110,8 +111,14 @@ class CollectionParser(HTMLParser):
         attributes = dict(attrs)
         href = attributes.get("href")
 
-        if href and "/products/" in href:
+        if not href:
+            return
+
+        if "/products/" in href:
             self.product_links.append(href)
+
+        if "page=" in href:
+            self.pagination_links.append(href)
 
 
 class ProductParser(HTMLParser):
@@ -1109,6 +1116,151 @@ def extract_product_urls(
     )
 
 
+def extract_next_collection_url(html_bytes, collection_page_url):
+    """Detecta la URL de la siguiente página de la colección, si existe.
+
+    No asume una cantidad total de páginas: compara el parámetro page
+    de cada enlace candidato contra la página actual y avanza solo si
+    hay un número de página mayor, dentro del mismo path de colección.
+    """
+
+    html = html_bytes.decode(
+        "utf-8",
+        errors="replace",
+    )
+
+    parser = CollectionParser()
+    parser.feed(html)
+
+    current_parsed = urlsplit(collection_page_url)
+    current_path = current_parsed.path.rstrip("/")
+    current_page_values = parse_qs(
+        current_parsed.query
+    ).get("page", ["1"])
+
+    try:
+        current_page_number = int(
+            current_page_values[0]
+        )
+    except (TypeError, ValueError):
+        current_page_number = 1
+
+    best_url = None
+    best_number = None
+
+    for href in parser.pagination_links:
+        absolute = urljoin(
+            collection_page_url,
+            href,
+        )
+        candidate = urlsplit(absolute)
+
+        # Una página de colección válida nunca puede
+        # abandonar el dominio contractual de Amarket.
+        if (
+            candidate.scheme.lower() != "https"
+            or candidate.netloc.lower()
+            != "amarket.com.bo"
+            or candidate.path.rstrip("/")
+            != current_path
+        ):
+            continue
+
+        candidate_page_values = parse_qs(
+            candidate.query
+        ).get("page")
+
+        if not candidate_page_values:
+            continue
+
+        try:
+            candidate_number = int(
+                candidate_page_values[0]
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if candidate_number <= current_page_number:
+            continue
+
+        if (
+            best_number is None
+            or candidate_number < best_number
+        ):
+            best_number = candidate_number
+            best_url = absolute
+
+    return best_url
+
+
+def discover_all_product_urls(client, robots_parser, collection_url):
+    """Recorre dinámicamente todas las páginas de la colección.
+
+    La identidad de cada página conserva la query string completa (no
+    usa canonicalize_product_url, que la descarta) para no colisionar
+    distintas páginas de paginación entre sí y así evitar loops.
+    """
+
+    visited_pages = set()
+    discovered = set()
+    page_count = 0
+
+    current_url = collection_url
+
+    while current_url:
+        parsed = urlsplit(current_url)
+        page_identity = (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.query,
+        )
+
+        # Un full crawl no puede declararse completo
+        # si la navegación entra en un ciclo.
+        if page_identity in visited_pages:
+            raise RuntimeError(
+                "PAGINATION_LOOP_DETECTED"
+            )
+
+        visited_pages.add(page_identity)
+
+        if not robots_parser.can_fetch(
+            client.user_agent,
+            current_url,
+        ):
+            raise PermissionError(
+                "ROBOTS_COLLECTION_BLOCKED"
+            )
+
+        response = client.get(current_url)
+
+        if response["status"] != 200:
+            raise RuntimeError(
+                "La colección no respondió HTTP 200."
+            )
+
+        validate_html_content_type(
+            response["content_type"]
+        )
+
+        page_count += 1
+
+        discovered.update(
+            extract_product_urls(
+                response["body"],
+                current_url,
+            )
+        )
+
+        current_url = extract_next_collection_url(
+            response["body"],
+            current_url,
+        )
+
+    return sorted(discovered), page_count
+
+
 def extract_sku_from_product_url(product_url):
     """Extrae SKU desde el slug /products/<sku> cuando está disponible."""
 
@@ -1882,31 +2034,12 @@ def run_full_crawl(config):
     )
 
     print(
-        "2/5 Descargando colección..."
+        "2/5 Descubriendo colección paginada..."
     )
 
-    collection_response = client.get(
-        collection_url
-    )
-
-    if (
-        collection_response["status"]
-        != 200
-    ):
-        raise RuntimeError(
-            "La colección no respondió HTTP 200."
-        )
-
-    validate_html_content_type(
-        collection_response[
-            "content_type"
-        ]
-    )
-
-    product_urls = extract_product_urls(
-        collection_response[
-            "body"
-        ],
+    product_urls, collection_pages = discover_all_product_urls(
+        client,
+        robots_parser,
         collection_url,
     )
 
@@ -1916,6 +2049,10 @@ def run_full_crawl(config):
         )
 
     selected_urls = product_urls
+
+    print(
+        f"Páginas de colección: {collection_pages}"
+    )
 
     print(
         f"3/5 Productos seleccionados: "
@@ -2260,6 +2397,7 @@ def run_full_crawl(config):
             "rejected_this_run": (
                 rejected_this_run
             ),
+            "collection_pages": collection_pages,
         }
     )
 
