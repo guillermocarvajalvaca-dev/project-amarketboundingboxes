@@ -20,6 +20,7 @@ from src.scraper_extraction import (
     calculate_sha256,
     check_robots,
     discover_all_product_urls,
+    extract_next_collection_url,
     duplicate_group_id,
     load_config,
     main,
@@ -2071,6 +2072,83 @@ class TestScraperExtraction(unittest.TestCase):
             product_urls,
             expected_urls,
         )
+
+
+    def test_pagination_ignores_external_domain(self):
+        """No sigue paginación fuera del dominio contractual."""
+
+        base_url = (
+            "https://amarket.com.bo/collections/lo-nuevo"
+        )
+
+        html = (
+            "<html><body>"
+            '<a href="/products/producto-a">'
+            "Producto A"
+            "</a>"
+            '<a href="https://evil.example/'
+            'collections/lo-nuevo?page=2">'
+            "Siguiente"
+            "</a>"
+            "</body></html>"
+        ).encode("utf-8")
+
+        next_url = extract_next_collection_url(
+            html,
+            base_url,
+        )
+
+        self.assertIsNone(
+            next_url
+        )
+
+
+    def test_pagination_loop_fails_explicitly(self):
+        """Un loop debe fallar, no truncar silenciosamente."""
+
+        base_url, responses, _ = (
+            _build_paginated_collection_fixture()
+        )
+
+        config = {
+            "http": {
+                "user_agent": (
+                    "PROJECT_AMARKETBOUNDINGBOXES/1.0 test"
+                ),
+                "delay_seconds": 0,
+                "timeout_seconds": 20,
+                "max_retries": 3,
+                "backoff_seconds": 0,
+            }
+        }
+
+        client = PoliteHttpClient(
+            config
+        )
+
+        with _patch_amarket_network(
+            responses
+        ):
+            robots_parser = check_robots(
+                client,
+                base_url,
+                base_url,
+            )
+
+            with patch(
+                "src.scraper_extraction."
+                "extract_next_collection_url",
+                return_value=base_url,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "PAGINATION_LOOP_DETECTED",
+                ):
+                    discover_all_product_urls(
+                        client,
+                        robots_parser,
+                        base_url,
+                    )
 
 
 if __name__ == "__main__":

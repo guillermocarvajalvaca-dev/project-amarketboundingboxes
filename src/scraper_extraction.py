@@ -1119,7 +1119,7 @@ def extract_product_urls(
 def extract_next_collection_url(html_bytes, collection_page_url):
     """Detecta la URL de la siguiente página de la colección, si existe.
 
-    No asume una cantidad total de páginas: compara el parámetro `page`
+    No asume una cantidad total de páginas: compara el parámetro page
     de cada enlace candidato contra la página actual y avanza solo si
     hay un número de página mayor, dentro del mismo path de colección.
     """
@@ -1155,7 +1155,15 @@ def extract_next_collection_url(html_bytes, collection_page_url):
         )
         candidate = urlsplit(absolute)
 
-        if candidate.path.rstrip("/") != current_path:
+        # Una página de colección válida nunca puede
+        # abandonar el dominio contractual de Amarket.
+        if (
+            candidate.scheme.lower() != "https"
+            or candidate.netloc.lower()
+            != "amarket.com.bo"
+            or candidate.path.rstrip("/")
+            != current_path
+        ):
             continue
 
         candidate_page_values = parse_qs(
@@ -1208,8 +1216,12 @@ def discover_all_product_urls(client, robots_parser, collection_url):
             parsed.query,
         )
 
+        # Un full crawl no puede declararse completo
+        # si la navegación entra en un ciclo.
         if page_identity in visited_pages:
-            break
+            raise RuntimeError(
+                "PAGINATION_LOOP_DETECTED"
+            )
 
         visited_pages.add(page_identity)
 
