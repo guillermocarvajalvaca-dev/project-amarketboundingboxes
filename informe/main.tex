@@ -166,13 +166,45 @@ particiones distintas y las métricas quedarían infladas por memorización.
 
 \subsection{Entrenamiento y evaluación}
 
-Se parte de un detector preentrenado YOLOv8n, ajustado sobre la partición de
+% TODO-RESULTADOS
+% El baseline preentrenado exacto es la decision abierta O-003 del registro
+% de decisiones (docs/governance/00_GOVERNANCE/DECISION_REGISTER.md): a la
+% fecha de este parrafo aun no tiene aprobacion formal del coordinador.
+% YOLO11n es el modelo declarado en configs/baseline.yaml y el que corre la
+% interfaz de \texttt{src/train.py}/\texttt{src/evaluate.py} durante la fase
+% de validacion contra el fixture propio (gate G2); queda sujeto a
+% confirmarse o cambiarse cuando se cierre O-003, antes del entrenamiento
+% final (G4).
+Se parte de un detector preentrenado YOLO11n, ajustado sobre la partición de
 entrenamiento y seleccionado sobre la de validación. La semilla queda fijada en
-\texttt{42} y los hiperparámetros se declaran en configuración versionada, nunca
-embebidos en el código.
+\texttt{42} y los hiperparámetros se declaran en configuración versionada
+(\texttt{configs/baseline.yaml}), nunca embebidos en el código: la única
+excepción es \texttt{--seed}, que \texttt{src/train.py} acepta como override
+explícito de línea de comandos precisamente para que quede registrado con qué
+semilla corrió cada experimento.
 
-La partición de prueba permanece bloqueada durante todo el ajuste. Se consulta
-una sola vez, al final, y su resultado no realimenta ninguna decisión de diseño.
+El determinismo se persigue en varios niveles a la vez: semilla de Python,
+NumPy y PyTorch, \texttt{PYTHONHASHSEED}, y \texttt{workers=0} en el
+\emph{dataloader} para que no haya reordenamiento de lotes por paralelismo. En
+la fase de validación de interfaz (G2) la aumentación de datos se mantiene
+desactivada por completo (\texttt{mosaic}, \texttt{hsv\_h/s/v},
+\texttt{fliplr}, \texttt{flipud} en cero) para aislar el determinismo del
+propio entrenamiento del de cualquier transformación aleatoria; esa decisión
+se revisa para el entrenamiento final sobre datos reales. Cada corrida escribe
+su configuración resuelta y su entorno (versión de Python, framework, commit y
+hardware) junto a los pesos, de modo que ningún resultado depende de leer el
+código para saber qué se ejecutó.
+
+La partición de prueba permanece bloqueada durante todo el ajuste: el propio
+CLI de evaluación rechaza correrse sobre \texttt{--split test} si no se pasa
+explícitamente \texttt{--allow-test}, que solo se habilita después de G4. Se
+consulta una sola vez, al final, y su resultado no realimenta ninguna decisión
+de diseño.
+
+Dos evaluaciones del mismo peso y el mismo split producen métricas idénticas
+--- verificado empíricamente, no solo declarado --- y cada corrida deja un
+\emph{manifest} con el hash SHA-256 del peso evaluado, para que cualquier cifra
+del informe sea trazable a un archivo concreto.
 
 La inferencia se verifica adicionalmente en CPU, sin CUDA, para acreditar que el
 resultado es reproducible en hardware ordinario.
@@ -282,25 +314,68 @@ acotada por el catálogo de origen y por sus convenciones fotográficas.
 
 \subsection{Entorno}
 
-% TODO-RESULTADOS
-% El mecanismo de entorno reproducible es una decision abierta: issue
-% ENV-001 del gate G1. El repositorio se creo deliberadamente sin
-% requirements.txt ni environment.yml para no fijarlo por defecto.
-% Completar con la version de Python y el archivo de entorno una vez
-% aprobada la ADR correspondiente.
+El entorno reproducible quedó fijado por la decisión ENV-001 del gate G1
+(aprobada y fusionada): la versión de Python está anclada en \texttt{3.11.9}
+y las dependencias directas quedan ancladas por versión exacta en
+\texttt{requirements.txt} --- entre ellas \texttt{pillow==12.3.0},
+\texttt{numpy==2.4.6}, \texttt{ultralytics==8.4.120} y
+\texttt{PyYAML==6.0.3}. PyTorch se resuelve de forma transitiva a través de
+\texttt{ultralytics}; en Windows se instala por defecto la variante CPU
+(\texttt{torch~2.13.0+cpu}), documentada explícitamente para no asumir CUDA
+disponible en toda máquina del equipo. Las instrucciones completas de
+instalación por sistema operativo, el comando de verificación del entorno y
+la cadena de herramientas de \LaTeX{} usada para compilar este informe están
+documentadas en \texttt{docs/ENVIRONMENT.md}.
 
 \subsection{Comandos}
 
 El flujo completo se ejecuta desde la línea de órdenes, sin depender de
-\emph{notebooks}:
+\emph{notebooks}, con las invocaciones exactas fijadas por el contrato de
+CLI y evaluación
+(\texttt{docs/governance/02\_CONTRACTS/CLI\_AND\_EVALUATION\_CONTRACT.md}):
 
 \begin{verbatim}
-python src/scraper_extraction.py --smoke-test --limit 3
-python src/data/make_boxes.py
-python src/data/make_splits.py
-python src/train.py    --config configs/baseline.yaml
-python src/evaluate.py --weights <peso> --split test
-python src/predict.py  --weights <peso> --source <imagen>
+python src/scraper_extraction.py \
+  --config configs/data_sources.yaml \
+  --output-dir data/raw/amarket \
+  --manifest data/manifests/source_assets.csv \
+  --limit 3
+
+python src/data/validate_downloads.py \
+  --manifest data/manifests/source_assets.csv \
+  --output outputs/data_quality_report.json
+
+python src/data/make_boxes.py \
+  --config configs/dataset.yaml \
+  --manifest data/manifests/source_assets.csv \
+  --images-dir data/raw/amarket \
+  --labels-dir data/labels \
+  --audit outputs/box_audit.csv \
+  --visualization-dir outputs/box_qa
+
+python src/data/make_splits.py \
+  --manifest data/manifests/source_assets.csv \
+  --box-audit outputs/box_audit.csv \
+  --output data/manifests/splits.csv \
+  --seed 42
+
+python src/train.py \
+  --config configs/baseline.yaml \
+  --data configs/dataset.yaml \
+  --output-dir outputs/runs/baseline \
+  --seed 42
+
+python src/evaluate.py \
+  --model outputs/runs/baseline/best.pt \
+  --data configs/dataset.yaml \
+  --split test \
+  --output-dir outputs/evaluation/baseline
+
+python src/predict.py \
+  --model outputs/runs/baseline/best.pt \
+  --input data/sample \
+  --device cpu \
+  --output-dir outputs/predictions
 \end{verbatim}
 
 \subsection{Determinismo}
