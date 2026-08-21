@@ -160,3 +160,37 @@ Descripción del PR #23 actualizada:
 Puntos 1-5 completos. Punto 6 (pandas como dependencia) depende de
 ENV-002 (issue #25), no es acción propia. Falta punto 7: re-ejecutar
 checklist completo y publicar evidencia final en el PR.
+
+## SPL-001 ??? Ejecuci??n real final (2026-08-21)
+
+Estado:
+- implementation_status: PASSED_ON_REAL_DATASET
+- real_dataset_execution: PASS
+- overall_G3_status: READY_FOR_FINAL_REVIEW
+- source_name: AMARKET
+- accepted_assets: 655
+
+Split real congelado:
+- seed: 42
+- ratios: train=0.70, val=0.15, test=0.15
+- train: 459
+- val: 98
+- test: 98
+- leakage sku_id: 0
+- leakage source_asset_id: 0
+- leakage duplicate_group_id: 0
+- invalid_boxes: 0
+- orphan_images: 0
+- orphan_labels: 0
+- deterministic_double_run: PASS
+
+Trazabilidad:
+- frozen_source_splits_sha256: aabe8eec4ebd19c1b681a07479dc61bee9b1ef7be12473d6dc9d26c43b01577c
+- canonical_repo_splits_sha256: 8b27f650665b3b1dca09b601e120179c756b0510d36967e4c1692d86816ee346
+- box_audit_sha256: a8cf09b93854509549e5d075368b5afe8df33b4e702b522925f2c3e26656c7cf
+- box_algorithm_version: pixel-extremes-v1
+- parameters_hash: 87f64e55aa7b63804c03badb8d3cf038c7f8a2bdff322bf6a983acd6697d72a0
+
+Nota:
+- El corpus auxiliar RPC no modifica el split can??nico AMARKET de SPL-001.
+- El test AMARKET queda bloqueado para evaluaci??n final.
