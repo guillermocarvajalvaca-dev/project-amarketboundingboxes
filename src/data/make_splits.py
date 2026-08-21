@@ -141,4 +141,3 @@ def _validate_ratios(ratios) -> None:
         raise ValueError(
             f"ratios debe sumar 1.0; suma actual: {total}"
         )
-
