@@ -1,0 +1,18 @@
+priority,task_id,task,inputs,output,status,claimed_by,reviewer,evidence,done_when
+P0,P2-001,Freeze/record Phase 2 governance,Phase 1 governing docs + coordinator authorization,Phase 2 v2.0.0 governing package,PASSED,,,,governing package frozen
+P0,P2-002,Locate canonical 655 manifest/splits/image roots,existing project data/evidence,verified canonical paths + counts,PENDING,,,,655 total; 459/98/98 resolved
+P0,P2-003,Implement independent AMARKET metadata enrichment,canonical product_page_url manifest + executed POC,enrich_product_metadata.py + focused tests,PENDING,,,,sample extraction works; no image download
+P0,P2-004,Run full metadata enrichment,P2-003 + 655 product URLs,source_assets_enriched.csv + summary/failures,PENDING,,,,input/output rows equal; category coverage reported
+P0,P2-005,Build train-only cutout library,459 train images + foreground logic + enriched metadata,cutouts + cutout manifest,PENDING,,,,eligible train-only cutouts validated
+P0,P2-006,Resolve deterministic usage assignment,459 eligible train source IDs + 10_SCENE_PLAN_655.csv,product assignment/usage manifest,PENDING,,,,3287 slots; 74x8 + 385x7; no within-scene duplicate
+P0,P2-007,Implement deterministic synthetic compositor,cutouts + scene plan + generation contract,make_synthetic_scenes.py + tests,PENDING,,,,"supports visible-mask boxes, levels, exact counts"
+P0,P2-008,Generate and review 30-scene pilot,P2-007,30 pilot images/labels + QA overlays,PENDING,,,,10/10/10; automated checks + independent visual PASS
+P1,P2-009,Generate full 655 synthetic dataset,P2-G2 PASS,655 images/labels + scene manifest,PENDING,,,,655 scenes; 3287 labels; exact distribution
+P1,P2-010,Run global synthetic QA/leakage audit,full synthetic dataset + canonical splits,QA report,PENDING,,,,train-only lineage; counts/bounds/hashes PASS
+P1,P2-011,Materialize Experiment B training config,459 real train + 655 synthetic,augmented dataset config,PENDING,,,,1114 train; canonical val/test unchanged
+P1,P2-012,Train Experiment B,augmented config + pretrained YOLO11n,weights + curves + resolved config,PENDING,,,,training exit0; validation evidence; final candidate frozen
+P1,P2-013,Canonical A/B evaluation,frozen A and B + canonical test,A/B metrics + repeat evidence,PENDING,,,,same protocol; no post-test tuning
+P2,P2-014,Build RPC external challenge,RPC val JSON + selected images,challenge images/labels/manifest,PENDING,,,,exact achieved buckets/count documented
+P2,P2-015,Evaluate A/B on RPC challenge + latency,frozen A/B + challenge,challenge metrics/qualitative + timing,PENDING,,,,same challenge; device/imgsz/timing disclosed
+P2,P2-016,Update README/report/site/demo,P2 results,delivery artifacts,PENDING,,,,Phase2 evidence/limitations integrated
+P2,P2-017,Final reproducibility/defense check,all passed artifacts,final checklist,PENDING,,,,critical commands/demo reproducible
