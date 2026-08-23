@@ -180,19 +180,35 @@ Suite completa del repositorio:
 python -m pytest tests/ -q
 ```
 
-Resultado: **104 passed, 1 skipped, 2 failed**. Los 2 fallos
-(`test_train_evaluate_cli.py::test_01_smoke_train_produce_artefactos_contractuales`
-y `::test_04_evaluacion_repetida_sobre_mismo_peso_es_identica`) son
-preexistentes y no relacionados con este cambio: fallan por
-`ModuleNotFoundError: No module named 'torch'` porque este entorno de
-ejecución no tiene instalado `ultralytics`/`torch` (pinneados en
-`requirements.txt` pero no presentes en este sandbox). No tocan
-`src/data/enrich_amarket_metadata.py` ni ningún archivo de esta tarea.
+**Primera corrida**, con Python 3.13.9 del sistema (sin `.venv`,
+`ultralytics`/`torch` no instalados): 104 passed, 1 skipped, 2 failed. Los 2
+fallos (`test_train_evaluate_cli.py::test_01_smoke_train_produce_artefactos_contractuales`
+y `::test_04_evaluacion_repetida_sobre_mismo_peso_es_identica`) eran por
+`ModuleNotFoundError: No module named 'torch'`.
 
-Nota de entorno: esta ejecución corrió con Python 3.13.9 del sistema
-(`pytest 9.1.1`, `PyYAML` disponibles globalmente), no con el `.venv` 3.11.9
-documentado en `docs/ENVIRONMENT.md`. El comportamiento del enriquecedor no
-depende de versión de Python más allá de la librería estándar + PyYAML.
+**Segunda corrida**, ya con `.venv` creado con el Python pinneado del
+proyecto (`py -3.11`, `python --version` → `Python 3.11.9`) y
+`requirements.txt` instalado íntegro (`pillow==12.3.0`, `numpy==2.4.6`,
+`ultralytics==8.4.120`, `PyYAML==6.0.3`, `pandas==3.0.5`, `pytest==9.1.1`):
+106 passed, 1 failed. Con `torch` presente, los 2 fallos anteriores y el
+test antes `skipped` ahora corren y pasan. Aparece 1 fallo distinto:
+`test_scraper_extraction.py::TestScraperExtraction::test_s02_incomplete_config_fails`,
+por un problema de encoding de `subprocess` en Windows (el mensaje de error
+`"Falta la sección obligatoria"` llega a `stderr` como
+`"Falta la secciÃ³n obligatoria"`, con tilde/ñ mal decodificados, y el
+`assertIn` literal no matchea). Es **preexistente y no relacionado con esta
+tarea**: pertenece a `tests/test_scraper_extraction.py` sobre
+`src/scraper_extraction.py`, ninguno de los dos tocado por este cambio
+(`git log -1` sobre ambos apunta a `d24bd800`, PR #31, ajeno a esta rama).
+No aparecía en la primera corrida porque bajo Python 3.13.9 del sistema esa
+combinación específica de locale/`subprocess`/encoding se comportaba
+distinto; es un hallazgo de entorno Windows, no una regresión introducida
+aquí.
+
+Ninguna de las dos corridas de la suite completa registra un fallo dentro de
+`src/data/enrich_amarket_metadata.py`, `configs/metadata_enrichment.yaml` ni
+`tests/test_enrich_amarket_metadata.py`: los 10/10 tests focalizados de esta
+tarea pasan de forma idéntica en ambos entornos.
 
 ## No agregado sin necesidad
 
