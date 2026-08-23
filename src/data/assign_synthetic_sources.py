@@ -18,6 +18,14 @@ Reglas gobernantes:
   74 productos usados 8 veces y 385 usados 7 veces (derivado de divmod(3287, 459));
 - ningún source_asset_id se repite dentro de una misma escena;
 - la asignación es totalmente determinista: mismo input => mismo output byte a byte;
+- la distribución respeta la tolerancia geométrica de cada escena usando
+  foreground_pixels del manifiesto de cutouts como medida de tamaño: los
+  cutouts con más foreground se dirigen a las escenas más tolerantes
+  (dificultad más permisiva y menos objetos) y los más chicos a las estrictas
+  (basic con más objetos). Desempates por source_asset_id y scene_id; las
+  cuotas 74x8/385x7 y el resto de las invariantes no cambian. Si el manifiesto
+  no declara foreground_pixels, toda fuente mide 0 y el orden interno cae al
+  desempate lexicográfico (determinista igualmente);
 - category y metadata_status se propagan literalmente desde el cutout manifest
   (§9 del contrato de generación exige registrar categoría para análisis);
   category puede quedar vacía, pero solo si metadata_status es explícito y no vacío;
@@ -46,6 +54,12 @@ GOVERNING_SOURCE_COUNT = 459
 
 ACCEPTED_STATUS = "accepted"
 TRAIN_SPLIT = "train"
+
+# Tolerancia geométrica RELATIVA de cada dificultad (01_CONTRACT §8): a mayor
+# oclusión permitida y menor escala mínima, más espacio tiene un cutout grande
+# para encajar. Solo ordena la distribución de fuentes (large=>tolerante,
+# small=>estricta); no altera ningún valor contractual del compositor.
+DIFFICULTY_TOLERANCE_RANK = {"basic": 0, "medium": 1, "hard": 2, "extreme": 3}
 
 # category se propaga literal (puede quedar vacía); metadata_status es
 # obligatorio y no vacío: es el único caso en que una categoría vacía es
@@ -270,6 +284,26 @@ def load_cutout_library(path, governing=True):
         # (ya verificado no vacío arriba) documenta por qué.
         category = (row["category"] or "").strip()
 
+        # foreground_pixels es opcional pero, si el manifiesto lo declara,
+        # debe ser un entero >= 0: gobierna la distribución por tolerancia
+        # geométrica. Sin la columna, toda fuente mide 0 (determinista).
+        foreground_pixels_text = (row.get("foreground_pixels") or "").strip()
+        if foreground_pixels_text:
+            try:
+                foreground_pixels = int(foreground_pixels_text)
+            except ValueError as exc:
+                raise AssignmentError(
+                    f"cutout manifest línea {lineno}: 'foreground_pixels' no es "
+                    f"un entero para {source_asset_id} ({foreground_pixels_text!r})"
+                ) from exc
+            if foreground_pixels < 0:
+                raise AssignmentError(
+                    f"cutout manifest línea {lineno}: 'foreground_pixels' negativo "
+                    f"para {source_asset_id} ({foreground_pixels})"
+                )
+        else:
+            foreground_pixels = 0
+
         sources[source_asset_id] = {
             "source_asset_id": source_asset_id,
             "sku_id": row["sku_id"].strip(),
@@ -277,6 +311,7 @@ def load_cutout_library(path, governing=True):
             "metadata_status": metadata_status,
             "cutout_relative_path": cutout_relative_path,
             "cutout_sha256": row["cutout_sha256"].strip(),
+            "foreground_pixels": foreground_pixels,
         }
 
     if governing and len(sources) != GOVERNING_SOURCE_COUNT:
@@ -312,19 +347,51 @@ def compute_usage_quotas(ordered_source_ids, total_placements):
     }
 
 
-def build_placement_queue(ordered_source_ids, quotas):
+def _scene_tolerance_key(scene):
+    """Orden de CONSUMO de escenas: más tolerantes primero.
+
+    La tolerancia crece con la dificultad (basic<medium<hard<extreme: más
+    oclusión permitida y menor escala mínima) y, dentro de una dificultad,
+    con MENOS objetos por escena (más espacio por objeto). Desempate por
+    scene_id ascendente. Las escenas estrictas consumen al final, cuando la
+    cola ya solo contiene los cutouts chicos.
+    """
+    rank = DIFFICULTY_TOLERANCE_RANK.get(scene["difficulty"])
+    if rank is None:
+        raise AssignmentError(
+            f"escena {scene['scene_id']}: dificultad desconocida "
+            f"'{scene['difficulty']}' (tolerancias: {sorted(DIFFICULTY_TOLERANCE_RANK)})"
+        )
+    return (-rank, scene["n_products"], scene["scene_id"])
+
+
+def _source_size_key(source_id, sources):
+    """Orden dentro de cada pasada de la cola: más foreground primero.
+
+    foreground_pixels mide el tamaño real del objeto; desempate por
+    source_asset_id ascendente para determinismo total.
+    """
+    return (-sources[source_id]["foreground_pixels"], source_id)
+
+
+def build_placement_queue(ordered_source_ids, quotas, sources):
     """Construye la cola de placements en pasadas completas.
 
-    La pasada p incluye toda fuente cuya cuota sea > p, en orden lexicográfico.
+    La pasada p incluye toda fuente cuya cuota sea > p, ordenada por tamaño
+    DESCENDENTE de foreground (desempate lexicográfico por source_asset_id).
     Con cuotas 8/7 esto da 7 pasadas de 459 más una pasada final de 74: cada
     uso de una fuente queda separado del anterior por ~459 posiciones, así que
     las colisiones dentro de escena (máximo 15 objetos) son estructuralmente
-    improbables y, si aparecen, se resuelven por rotación.
+    improbables y, si aparecen, se resuelven por rotación. Como las escenas se
+    consumen de más tolerante a más estricta, la cabeza de cada pasada (los
+    cutouts grandes) alimenta a las escenas tolerantes y la cola (los chicos)
+    queda para las estrictas.
     """
+    size_order = sorted(ordered_source_ids, key=lambda s: _source_size_key(s, sources))
     max_quota = max(quotas.values())
     queue = []
     for pass_index in range(max_quota):
-        for source_id in ordered_source_ids:
+        for source_id in size_order:
             if quotas[source_id] > pass_index:
                 queue.append(source_id)
     return queue
@@ -333,24 +400,29 @@ def build_placement_queue(ordered_source_ids, quotas):
 def assign_sources(scene_plan, sources, governing=True):
     """Asigna fuentes a cada placement de cada escena, de forma determinista.
 
-    Recorre el plan en su orden congelado y consume la cola de placements. Si
-    la fuente en cabeza ya se usó en la escena actual, se difiere: se aparta y
-    se reinserta al frente de la cola para la siguiente escena (rotación
+    Las escenas CONSUMEN la cola en orden de tolerancia geométrica
+    (_scene_tolerance_key: más tolerantes primero), de modo que los cutouts
+    grandes (cabeza de cada pasada de la cola) alimentan a las escenas con
+    más margen y los chicos quedan para las estrictas. La SALIDA, en cambio,
+    se emite en el orden congelado del plan: scene_id, dificultad, seed y
+    n_products de cada fila son exactamente los del plan. Si la fuente en
+    cabeza ya se usó en la escena actual, se difiere: se aparta y se
+    reinserta al frente de la cola para la siguiente escena (rotación
     determinista, §4 del contrato de generación). Ninguna cuota se pierde.
     """
     ordered_source_ids = sorted(sources)
     total_placements = sum(scene["n_products"] for scene in scene_plan)
 
     quotas = compute_usage_quotas(ordered_source_ids, total_placements)
-    queue = deque(build_placement_queue(ordered_source_ids, quotas))
+    queue = deque(build_placement_queue(ordered_source_ids, quotas, sources))
 
     if len(queue) != total_placements:  # pragma: no cover - invariante
         raise AssignmentError(
             f"cola de {len(queue)} entradas para {total_placements} placements"
         )
 
-    assignments = []
-    for scene in scene_plan:
+    chosen_by_scene = {}
+    for scene in sorted(scene_plan, key=_scene_tolerance_key):
         n_products = scene["n_products"]
         if n_products > len(ordered_source_ids):
             raise AssignmentError(
@@ -380,14 +452,20 @@ def assign_sources(scene_plan, sources, governing=True):
 
         # Los diferidos vuelven al frente conservando su orden relativo.
         queue.extendleft(reversed(deferred))
+        chosen_by_scene[scene["scene_id"]] = chosen
 
-        for placement_index, source_id in enumerate(chosen):
+    if queue:  # pragma: no cover - invariante
+        raise AssignmentError(f"quedaron {len(queue)} placements sin asignar")
+
+    assignments = []
+    for scene in scene_plan:  # orden congelado del plan (la salida no reordena)
+        for placement_index, source_id in enumerate(chosen_by_scene[scene["scene_id"]]):
             source = sources[source_id]
             assignments.append({
                 "scene_id": scene["scene_id"],
                 "difficulty": scene["difficulty"],
                 "scene_seed": scene["scene_seed"],
-                "planned_n_products": n_products,
+                "planned_n_products": scene["n_products"],
                 "placement_index": placement_index,
                 "source_asset_id": source_id,
                 "sku_id": source["sku_id"],
@@ -396,9 +474,6 @@ def assign_sources(scene_plan, sources, governing=True):
                 "cutout_relative_path": source["cutout_relative_path"],
                 "cutout_sha256": source["cutout_sha256"],
             })
-
-    if queue:  # pragma: no cover - invariante
-        raise AssignmentError(f"quedaron {len(queue)} placements sin asignar")
 
     validate_assignments(assignments, scene_plan, quotas, governing=governing)
     return assignments
