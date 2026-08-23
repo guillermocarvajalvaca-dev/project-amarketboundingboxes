@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -11,12 +12,16 @@ import pytest
 from PIL import Image
 
 from src.data.make_cutouts import (
+    EnrichedManifestError,
+    MissingMetadataStatusError,
     NotTrainSplitError,
     build_cutout_library,
     build_foreground_mask,
     ensure_train_only,
+    load_enriched_manifest,
     make_cutout,
     process_row,
+    validate_enriched_join,
 )
 
 ALPHA_THRESHOLD = 127
@@ -91,6 +96,62 @@ def _write_splits_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _make_enriched_row(split_row: dict, *, category: str = "", metadata_status: str = "OK") -> dict:
+    """Fila de source_assets_enriched.csv coherente con una fila de splits.csv.
+
+    sku_id/sha256/split se copian del split_row para que el join determinista
+    (validate_enriched_join) pase por defecto; los tests de discrepancia
+    modifican explicitamente estos valores para forzar el rechazo.
+    """
+    return {
+        "source_asset_id": split_row["source_asset_id"],
+        "sku_id": split_row["sku_id"],
+        "sha256": split_row["source_sha256"],
+        "split": split_row["split"],
+        "category": category,
+        "metadata_status": metadata_status,
+    }
+
+
+def _write_enriched_csv(path: Path, rows: list[dict]) -> None:
+    fieldnames = ["source_asset_id", "sku_id", "sha256", "split", "category", "metadata_status"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _build_library(
+    tmp_path: Path,
+    dataset_root: Path,
+    split_rows: list[dict],
+    enriched_rows: list[dict],
+    **overrides,
+) -> dict:
+    splits_path = overrides.pop("splits_path", tmp_path / "splits.csv")
+    enriched_path = overrides.pop("enriched_manifest_path", tmp_path / "enriched.csv")
+    output_root = overrides.pop("output_root", tmp_path / "output")
+    manifest_path = overrides.pop("manifest_path", tmp_path / "manifest.csv")
+
+    _write_splits_csv(splits_path, split_rows)
+    _write_enriched_csv(enriched_path, enriched_rows)
+
+    kwargs = dict(
+        dataset_root=dataset_root,
+        splits_path=splits_path,
+        enriched_manifest_path=enriched_path,
+        output_root=output_root,
+        manifest_path=manifest_path,
+        alpha_threshold=ALPHA_THRESHOLD,
+        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA,
+        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    kwargs.update(overrides)
+    return build_cutout_library(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Regla critica: train aceptado, val/test rechazados
 # ---------------------------------------------------------------------------
@@ -106,10 +167,12 @@ def test_train_row_is_accepted(tmp_path):
     )
     ensure_train_only(row)  # no debe lanzar
 
+    enriched_row = _make_enriched_row(row)
     record = process_row(
         row,
         dataset_root=dataset_root,
         output_root=tmp_path / "output",
+        enriched_row=enriched_row,
         alpha_threshold=ALPHA_THRESHOLD,
         background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
         foreground_delta=FOREGROUND_DELTA,
@@ -161,22 +224,10 @@ def test_build_cutout_library_never_touches_val_or_test(tmp_path):
             image_arr=_rgba_with_real_alpha(),
         ),
     ]
-    splits_path = tmp_path / "splits.csv"
-    _write_splits_csv(splits_path, rows)
-
+    enriched_rows = [_make_enriched_row(r) for r in rows]
     output_root = tmp_path / "output"
-    manifest_path = tmp_path / "manifest.csv"
 
-    summary = build_cutout_library(
-        dataset_root=dataset_root,
-        splits_path=splits_path,
-        output_root=output_root,
-        manifest_path=manifest_path,
-        alpha_threshold=ALPHA_THRESHOLD,
-        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
-        foreground_delta=FOREGROUND_DELTA,
-        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
-    )
+    summary = _build_library(tmp_path, dataset_root, rows, enriched_rows, output_root=output_root)
 
     assert summary["train_attempted"] == 1
     assert summary["cutout_accepted"] == 1
@@ -297,10 +348,12 @@ def test_source_identity_is_preserved(tmp_path):
         tmp_path, dataset_root, asset_id="identity-xyz", split="train",
         image_arr=_rgba_with_real_alpha(),
     )
+    enriched_row = _make_enriched_row(row)
     record = process_row(
         row,
         dataset_root=dataset_root,
         output_root=tmp_path / "output",
+        enriched_row=enriched_row,
         alpha_threshold=ALPHA_THRESHOLD,
         background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
         foreground_delta=FOREGROUND_DELTA,
@@ -324,22 +377,282 @@ def test_manifest_never_contains_absolute_paths(tmp_path):
             image_arr=_rgba_with_real_alpha(),
         ),
     ]
-    splits_path = tmp_path / "splits.csv"
-    _write_splits_csv(splits_path, rows)
+    enriched_rows = [_make_enriched_row(r) for r in rows]
     manifest_path = tmp_path / "manifest.csv"
 
-    build_cutout_library(
-        dataset_root=dataset_root,
-        splits_path=splits_path,
-        output_root=output_root,
-        manifest_path=manifest_path,
-        alpha_threshold=ALPHA_THRESHOLD,
-        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
-        foreground_delta=FOREGROUND_DELTA,
-        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    _build_library(
+        tmp_path, dataset_root, rows, enriched_rows,
+        output_root=output_root, manifest_path=manifest_path,
     )
 
     manifest_text = manifest_path.read_text(encoding="utf-8")
     assert str(dataset_root) not in manifest_text
     assert str(output_root) not in manifest_text
     assert str(tmp_path) not in manifest_text
+
+
+# ---------------------------------------------------------------------------
+# P2-005 correccion: join determinista contra source_assets_enriched.csv
+# ---------------------------------------------------------------------------
+
+def test_enriched_join_exact_match_by_source_asset_id(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    rows = [
+        _make_split_row(tmp_path, dataset_root, asset_id="j1", split="train", image_arr=_rgba_with_real_alpha()),
+        _make_split_row(tmp_path, dataset_root, asset_id="j2", split="val", image_arr=_rgba_with_real_alpha()),
+    ]
+    enriched_rows = [_make_enriched_row(r) for r in rows]
+
+    summary = _build_library(tmp_path, dataset_root, rows, enriched_rows)
+
+    assert summary["enriched_rows"] == 2
+    assert summary["splits_rows"] == 2
+    assert summary["join_matched"] == 2
+    assert summary["join_missing"] == 0
+    assert summary["join_extra"] == 0
+    assert summary["sku_mismatches"] == 0
+    assert summary["hash_mismatches"] == 0
+    assert summary["split_mismatches"] == 0
+
+
+def test_duplicate_source_asset_id_in_enriched_manifest_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="dup1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_rows = [_make_enriched_row(row), _make_enriched_row(row)]
+
+    splits_path = tmp_path / "splits.csv"
+    enriched_path = tmp_path / "enriched.csv"
+    _write_splits_csv(splits_path, [row])
+    _write_enriched_csv(enriched_path, enriched_rows)
+
+    with pytest.raises(EnrichedManifestError):
+        load_enriched_manifest(enriched_path)
+
+
+def test_missing_source_in_enriched_manifest_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    rows = [
+        _make_split_row(tmp_path, dataset_root, asset_id="m1", split="train", image_arr=_rgba_with_real_alpha()),
+        _make_split_row(tmp_path, dataset_root, asset_id="m2", split="train", image_arr=_rgba_with_real_alpha()),
+    ]
+    enriched_rows = [_make_enriched_row(rows[0])]  # falta m2
+
+    with pytest.raises(EnrichedManifestError):
+        _build_library(tmp_path, dataset_root, rows, enriched_rows)
+
+
+def test_extra_source_in_enriched_manifest_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="e1", split="train", image_arr=_rgba_with_real_alpha())
+    extra_row = _make_split_row(tmp_path, dataset_root, asset_id="e2-not-in-splits", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_rows = [_make_enriched_row(row), _make_enriched_row(extra_row)]
+
+    with pytest.raises(EnrichedManifestError):
+        _build_library(tmp_path, dataset_root, [row], enriched_rows)
+
+
+def test_sku_mismatch_between_manifests_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="sku1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row)
+    enriched_row["sku_id"] = "sku-DIFFERENT"
+
+    with pytest.raises(EnrichedManifestError):
+        _build_library(tmp_path, dataset_root, [row], [enriched_row])
+
+
+def test_sha_mismatch_between_manifests_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="sha1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row)
+    enriched_row["sha256"] = "0" * 64
+
+    with pytest.raises(EnrichedManifestError):
+        _build_library(tmp_path, dataset_root, [row], [enriched_row])
+
+
+def test_split_mismatch_between_manifests_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="split1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row)
+    enriched_row["split"] = "val"
+
+    with pytest.raises(EnrichedManifestError):
+        _build_library(tmp_path, dataset_root, [row], [enriched_row])
+
+
+def test_empty_metadata_status_is_rejected(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="nostatus1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, metadata_status="")
+
+    with pytest.raises(MissingMetadataStatusError):
+        _build_library(tmp_path, dataset_root, [row], [enriched_row])
+
+
+def test_nonempty_category_is_propagated_literally(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="cat1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, category="Bebidas")
+
+    record = process_row(
+        row,
+        dataset_root=dataset_root,
+        output_root=tmp_path / "output",
+        enriched_row=enriched_row,
+        alpha_threshold=ALPHA_THRESHOLD,
+        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA,
+        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    assert record["category"] == "Bebidas"
+
+
+def test_empty_category_is_allowed(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="cat2", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, category="")
+
+    record = process_row(
+        row,
+        dataset_root=dataset_root,
+        output_root=tmp_path / "output",
+        enriched_row=enriched_row,
+        alpha_threshold=ALPHA_THRESHOLD,
+        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA,
+        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    assert record["category"] == ""
+    assert record["status"] == "accepted"
+
+
+def test_failed_metadata_status_is_propagated(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="failstatus1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, metadata_status="FAILED")
+
+    record = process_row(
+        row,
+        dataset_root=dataset_root,
+        output_root=tmp_path / "output",
+        enriched_row=enriched_row,
+        alpha_threshold=ALPHA_THRESHOLD,
+        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA,
+        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    assert record["metadata_status"] == "FAILED"
+
+
+def test_failed_metadata_row_is_still_accepted_as_cutout(tmp_path):
+    """metadata_status=FAILED no debe excluir el cutout: la aceptacion depende
+    solo de imagen/mascara, nunca del resultado del scraping de metadata."""
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="failaccept1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, metadata_status="FAILED")
+
+    record = process_row(
+        row,
+        dataset_root=dataset_root,
+        output_root=tmp_path / "output",
+        enriched_row=enriched_row,
+        alpha_threshold=ALPHA_THRESHOLD,
+        background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA,
+        min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    assert record["status"] == "accepted"
+    assert record["metadata_status"] == "FAILED"
+
+
+def test_final_schema_contains_category_and_metadata_status(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="schema1", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_row = _make_enriched_row(row, category="Snacks", metadata_status="OK")
+    manifest_path = tmp_path / "manifest.csv"
+
+    _build_library(tmp_path, dataset_root, [row], [enriched_row], manifest_path=manifest_path)
+
+    with manifest_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert "category" in reader.fieldnames
+        assert "metadata_status" in reader.fieldnames
+        rows_out = list(reader)
+    assert len(rows_out) == 1
+    assert rows_out[0]["category"] == "Snacks"
+    assert rows_out[0]["metadata_status"] == "OK"
+
+
+def test_cutout_hash_dimensions_and_path_unaffected_by_metadata(tmp_path):
+    """Los campos derivados del cutout (hash/dimensiones/ruta) no deben
+    depender de category/metadata_status -- solo de la imagen fuente."""
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="stable1", split="train", image_arr=_rgba_with_real_alpha())
+
+    enriched_ok = _make_enriched_row(row, category="", metadata_status="OK")
+    enriched_failed = _make_enriched_row(row, category="Chocolates", metadata_status="FAILED")
+
+    record_ok = process_row(
+        row, dataset_root=dataset_root, output_root=tmp_path / "output_ok",
+        enriched_row=enriched_ok,
+        alpha_threshold=ALPHA_THRESHOLD, background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA, min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+    record_failed = process_row(
+        row, dataset_root=dataset_root, output_root=tmp_path / "output_failed",
+        enriched_row=enriched_failed,
+        alpha_threshold=ALPHA_THRESHOLD, background_uniformity_tolerance=BG_UNIFORMITY_TOLERANCE,
+        foreground_delta=FOREGROUND_DELTA, min_foreground_pixels=MIN_FOREGROUND_PIXELS,
+    )
+
+    assert record_ok["cutout_sha256"] == record_failed["cutout_sha256"]
+    assert record_ok["cutout_width"] == record_failed["cutout_width"]
+    assert record_ok["cutout_height"] == record_failed["cutout_height"]
+    assert record_ok["cutout_relative_path"] == record_failed["cutout_relative_path"]
+
+
+def test_load_enriched_manifest_rejects_duplicates_directly(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    row = _make_split_row(tmp_path, dataset_root, asset_id="direct-dup", split="train", image_arr=_rgba_with_real_alpha())
+    enriched_path = tmp_path / "enriched.csv"
+    _write_enriched_csv(enriched_path, [_make_enriched_row(row), _make_enriched_row(row)])
+
+    with pytest.raises(EnrichedManifestError):
+        load_enriched_manifest(enriched_path)
+
+
+def test_validate_enriched_join_passes_for_consistent_manifests(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    rows = [
+        _make_split_row(tmp_path, dataset_root, asset_id="ok1", split="train", image_arr=_rgba_with_real_alpha()),
+        _make_split_row(tmp_path, dataset_root, asset_id="ok2", split="test", image_arr=_rgba_with_real_alpha()),
+    ]
+    enriched_by_id = {r["source_asset_id"]: _make_enriched_row(r) for r in rows}
+
+    result = validate_enriched_join(rows, enriched_by_id)
+    assert result["join_missing"] == 0
+    assert result["join_extra"] == 0
+    assert result["sku_mismatches"] == 0
+    assert result["hash_mismatches"] == 0
+    assert result["split_mismatches"] == 0
+    assert result["join_matched"] == 2
+
+
+def test_cli_requires_enriched_manifest_argument(tmp_path, monkeypatch, capsys):
+    from src.data import make_cutouts
+
+    argv = [
+        "make_cutouts.py",
+        "--dataset-root", str(tmp_path / "dataset"),
+        "--splits", str(tmp_path / "splits.csv"),
+        "--output-root", str(tmp_path / "output"),
+        "--manifest", str(tmp_path / "manifest.csv"),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit):
+        make_cutouts.main()
+
+    captured = capsys.readouterr()
+    assert "--enriched-manifest" in captured.err
