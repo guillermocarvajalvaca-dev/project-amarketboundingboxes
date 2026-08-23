@@ -7,12 +7,43 @@
 - Rama: `feat/guillermo/P2-006-007-synthetic-compositor`
 - `main` gobernante: `3b4b97d1bd19b2e5625d6432d7b6e57c0b9b4522`
 - Commit inicial (auditado y marcado `CHANGES_REQUIRED`): `3ea3488a26438ab2534b04751f73491ea58b1d1c`
-- Commit de esta revisión: ver `COMMIT=` en el resultado final del PR #41
+- Commit de la corrección de auditoría (7 puntos): `2ad7d58eda4506003cb793fc39e853ff7f42ed5c`
+- `GENERATOR_CODE_COMMIT` de esta revisión (código bajo prueba, HEAD real del
+  worktree en el momento de ejecutar el piloto de fixtures):
+  `2ad7d58eda4506003cb793fc39e853ff7f42ed5c`
+- `EVIDENCE_COMMIT` (este documento): ver `COMMIT=` en el resultado final del PR #41
 - Fecha de ejecución: 2026-08-22
 
 Este documento registra **solo evidencia observada** de implementación y pruebas.
 No declara PASS del piloto gobernante ni de la corrida gobernante completa: ambos
 exigen los cutouts reales de P2-005 y todavía no se ejecutaron.
+
+## -1. Segunda observación corregida: procedencia del piloto de fixtures
+
+La primera versión de esta evidencia (adjunta al commit `2ad7d58`) documentaba
+el piloto de fixtures con `GENERATOR_COMMIT=3ea3488a26438ab2534b04751f73491ea58b1d1c`
+— el SHA del commit **anterior** a la corrección de auditoría, no el del código
+que efectivamente generó esas escenas. Era un error de transcripción de la
+evidencia, no del compositor: `validate_generator_commit()` solo valida el
+formato del SHA recibido por `--generator-commit`, nunca verifica que coincida
+con el HEAD real del repositorio.
+
+Esta sección reemplaza esa evidencia: el piloto de fixtures se **reejecutó
+realmente** (no se editó el texto) desde un worktree limpio en HEAD
+`2ad7d58eda4506003cb793fc39e853ff7f42ed5c`, pasando explícitamente
+`--generator-commit 2ad7d58eda4506003cb793fc39e853ff7f42ed5c`. Los fixtures
+temporales de la corrida anterior ya no existían (vivían fuera del repositorio,
+en un directorio de scratch de sesión); se recrearon programáticamente con el
+mismo procedimiento documentado en §4.7 (459 cutouts RGBA sintéticos con
+`category`/`metadata_status`, hash físico real). §4.7 más abajo contiene el
+resultado íntegro de esta reejecución.
+
+```
+GENERATOR_CODE_COMMIT=2ad7d58eda4506003cb793fc39e853ff7f42ed5c
+PILOT_FIXTURE_RERUN=PASS
+PILOT_REAL=NOT_RUN
+FULL_GOVERNING_RUN=NOT_RUN
+```
 
 ## 0. Correcciones de esta revisión (auditoría CHANGES_REQUIRED)
 
@@ -226,25 +257,37 @@ declaren el mismo `difficulty`, `scene_seed` y `planned_n_products`; una
 discrepancia aborta con `SceneGenerationError` en vez de usar silenciosamente
 los valores del primer placement leído.
 
-### 4.7 Piloto de fixtures observado
+### 4.7 Piloto de fixtures observado (reejecutado en HEAD `2ad7d58`)
 
 El piloto **real** (P2-008) no se ejecutó: requiere los cutouts reales de P2-005.
-Lo que sí se ejecutó es un piloto de fixtures sintéticos, con el plan de escenas
-real, cutouts generados programáticamente (con hash físico verificado) y los
-gates obligatorios activos:
+Lo que sí se ejecutó, de nuevo desde cero, es un piloto de fixtures sintéticos:
+worktree limpio en `2ad7d58eda4506003cb793fc39e853ff7f42ed5c` (verificado antes
+de correr: `git rev-parse HEAD` = ese SHA, `git status --short` vacío), 459
+cutouts RGBA recreados programáticamente en un directorio de scratch nuevo, con
+`category`/`metadata_status` y hash físico real, y los gates obligatorios
+activos:
 
 ```
+$ python -m src.data.assign_synthetic_sources \
+    --scene-plan docs/governance/03_PHASE2/10_SCENE_PLAN_655.csv \
+    --cutout-manifest <ruta privada>/fixture_cutout_library.csv \
+    --output <ruta privada>/scene_source_assignments.csv
+
+MODE=GOVERNING  SCENES=655  SOURCES=459  SKIPPED_NOT_ACCEPTED=0
+ROWS=3287  USAGE_HISTOGRAM=385x7+74x8
+(exit code 0)
+
 $ python -m src.data.make_synthetic_scenes \
     --assignments <ruta privada>/scene_source_assignments.csv \
     --cutout-root <ruta privada>/cutouts_root \
     --output-root <ruta privada>/synthetic \
     --manifest <ruta privada>/scene_manifest.csv \
     --cutout-manifest <ruta privada>/fixture_cutout_library.csv \
-    --generator-commit 3ea3488a26438ab2534b04751f73491ea58b1d1c \
+    --generator-commit 2ad7d58eda4506003cb793fc39e853ff7f42ed5c \
     --pilot --background-rgb "255,255,255"
 
 GENERATOR_VERSION=p2-synthetic-compositor/1.0.0
-GENERATOR_COMMIT=3ea3488a26438ab2534b04751f73491ea58b1d1c
+GENERATOR_COMMIT=2ad7d58eda4506003cb793fc39e853ff7f42ed5c
 MODE=PILOT
 SCENES=30
 IMAGES=30
@@ -252,15 +295,18 @@ LABELS=30
 PLACEMENTS=139
 LEAKAGE_GATE=ON
 QA=PASS
+(exit code 0)
 ```
 
-Composición observada del piloto:
+Composición observada del piloto (recontada sobre el manifiesto CSV producido):
 
 ```
-difficulty: {'basic': 10, 'medium': 10, 'hard': 10}      (extreme: 0)
-density:    basic n=2 x5, basic n=3 x5,
-            medium n=4 x5, medium n=5 x5,
-            hard n=6 x4, hard n=7 x3, hard n=8 x3
+scene count: 30
+difficulty distribution: {'basic': 10, 'medium': 10, 'hard': 10}      (extreme: 0)
+density distribution: basic n=2 x5, basic n=3 x5,
+                       medium n=4 x5, medium n=5 x5,
+                       hard n=6 x4, hard n=7 x3, hard n=8 x3
+images on disk: 30   labels on disk: 30
 ```
 
 Linaje observado en el manifiesto de 139 filas:
@@ -269,7 +315,8 @@ Linaje observado en el manifiesto de 139 filas:
 category distinct values: 6 (5 categorías de fixture + vacía)
 metadata_status: {'ok': 136, 'missing': 3}
 filas con category vacía: 3 -> todas con metadata_status='missing'
-filas con generator_commit no vacío: 139/139
+generator_commit values en el manifiesto: {'2ad7d58eda4506003cb793fc39e853ff7f42ed5c'}
+(un único valor, consistente en las 139 filas)
 ```
 
 Rangos observados sobre los 139 placements:
@@ -278,9 +325,25 @@ Rangos observados sobre los 139 placements:
 scale:    0.5505 .. 1.0950
 rotation: -34.582 .. +33.933
 max occlusion basic:  0.0000   (límite 0.05)
-max occlusion medium: 0.1365   (límite 0.15)
-max occlusion hard:   0.2121   (límite 0.30)
+max occlusion medium: 0.0000   (límite 0.15)
+max occlusion hard:   0.2586   (límite 0.30)
 label-count mismatches: []
+```
+
+Nota honesta: los rangos de oclusión difieren de la corrida anterior (que
+reportaba medium=0.1365, hard=0.2121) porque esta es una generación real nueva:
+los cutouts de fixture se recrearon con el mismo procedimiento pero no son
+byte-idénticos a los del directorio de scratch anterior (que ya no existía), y
+el compositor no tiene ninguna razón para producir la misma escena salvo que
+`scene_seed` y el contenido de los cutouts coincidan exactamente. Ambas
+observaciones son válidas: todas caen dentro de los límites de dificultad
+(0.05/0.15/0.30), que es lo que se está verificando.
+
+Hashes de muestra observados en esta corrida:
+
+```
+output_image_sha256 (primera fila): 729519044d37b3c93cb89fab502380302c607ceebf45772351544ea4df71920f
+output_label_sha256 (primera fila): ceb162fca92e03593aff51b8eac43773ea4750953224c82be5ff1a79b81a09c9
 ```
 
 Ninguna imagen generada se versiona en el repositorio: la salida vive fuera del
@@ -315,17 +378,20 @@ un revisor distinto que exige el gate P2-G2.
 
 ## 6. Resultado de pruebas observado
 
+Reconfirmado en esta corrección (mismo código, HEAD `2ad7d58`, sin cambios de
+código en esta revisión — solo se corrigió la evidencia documental):
+
 ```
 $ python -m pytest tests/test_assign_synthetic_sources.py -q
-33 passed in 0.46s
+33 passed in 0.48s
 (exit code 0)
 
 $ python -m pytest tests/test_make_synthetic_scenes.py -q
-71 passed in 12.64s
+71 passed in 12.27s
 (exit code 0)
 
 $ python -m pytest -q
-2 failed, 198 passed, 1 skipped in 15.32s
+2 failed, 198 passed, 1 skipped in 15.69s
 (exit code 1)
 
 $ git diff --check
@@ -336,7 +402,8 @@ $ git diff --check
 **La suite completa del repositorio sigue en estado FAIL (código de salida 1)**
 en este entorno. No se declara `FULL_TESTS=155/155 PASS` ni ninguna variante
 agregada que oculte los 2 fallos: el resultado exacto es
-`2 failed, 198 passed, 1 skipped`.
+`2 failed, 198 passed, 1 skipped`. Los conteos son idénticos a los medidos en
+el commit `2ad7d58` (código sin cambios en esta corrección documental).
 
 ## 7. Fallos preexistentes (no introducidos por esta rama)
 
@@ -377,7 +444,8 @@ fallan por la misma causa, ni uno más ni uno menos.
 | Gate anti-fuga obligatorio (sin bypass) | Sí |
 | Integridad de rutas (absoluta/traversal) | Sí |
 | Consistencia de linaje/difficulty/seed/n_products dentro de escena y entre escenas | Sí |
-| Piloto de fixtures 30 escenas | Sí (10 basic / 10 medium / 10 hard) |
+| Piloto de fixtures 30 escenas | Sí (10 basic / 10 medium / 10 hard), reejecutado realmente en HEAD `2ad7d58` con `--generator-commit` correcto |
+| Procedencia del piloto de fixtures (`GENERATOR_COMMIT`) | Corregida: coincide con el HEAD real que lo generó (`2ad7d58eda4506003cb793fc39e853ff7f42ed5c`) |
 | Piloto **real** con cutouts de P2-005 | **NO EJECUTADO** |
 | Corrida completa de 655 escenas reales | **NO EJECUTADA** (bloqueada por P2-005 y P2-008) |
 | Revisión visual por revisor no autor | **PENDIENTE** |
@@ -388,6 +456,13 @@ Secuencia pendiente: P2-005 cutouts READY/PASS → rehacer P2-006 con el
 manifiesto real (incluida su columna de categoría real, cuando P2-003/004 la
 entregue) → piloto REAL de 30 escenas (P2-008) → revisión visual por un
 revisor distinto del autor → recién entonces la corrida gobernante de 655.
+
+```
+GENERATOR_CODE_COMMIT=2ad7d58eda4506003cb793fc39e853ff7f42ed5c
+PILOT_FIXTURE_RERUN=PASS
+PILOT_REAL=NOT_RUN
+FULL_GOVERNING_RUN=NOT_RUN
+```
 
 `P2-006_IMPLEMENTATION=READY_FOR_REVIEW`, `P2-006_GOVERNING_RUN=NOT_RUN`,
 `P2-007_IMPLEMENTATION=READY_FOR_REVIEW`, `PILOT_REAL=NOT_RUN`,
