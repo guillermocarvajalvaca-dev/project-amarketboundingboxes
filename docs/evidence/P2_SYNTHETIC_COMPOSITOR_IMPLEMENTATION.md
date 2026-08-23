@@ -8,15 +8,61 @@
 - `main` gobernante: `3b4b97d1bd19b2e5625d6432d7b6e57c0b9b4522`
 - Commit inicial (auditado y marcado `CHANGES_REQUIRED`): `3ea3488a26438ab2534b04751f73491ea58b1d1c`
 - Commit de la corrección de auditoría (7 puntos): `2ad7d58eda4506003cb793fc39e853ff7f42ed5c`
-- `GENERATOR_CODE_COMMIT` de esta revisión (código bajo prueba, HEAD real del
-  worktree en el momento de ejecutar el piloto de fixtures):
-  `2ad7d58eda4506003cb793fc39e853ff7f42ed5c`
-- `EVIDENCE_COMMIT` (este documento): ver `COMMIT=` en el resultado final del PR #41
-- Fecha de ejecución: 2026-08-22
+- Commit de la corrección de procedencia del piloto de fixtures: `c6c6fbd4eeb766f64bc4ab4e4e9413333517d42a`
+- Commit de la corrección de colección bajo entorno canónico (este documento):
+  ver `COMMIT=` en el resultado final del PR #41
+- `GENERATOR_CODE_COMMIT` del piloto de fixtures documentado en §4.7 (HEAD real
+  del worktree en el momento de ejecutarlo): `2ad7d58eda4506003cb793fc39e853ff7f42ed5c`
+- Fecha de ejecución: 2026-08-22 (§0/§-1), 2026-08-23 (§-2, esta corrección)
 
 Este documento registra **solo evidencia observada** de implementación y pruebas.
 No declara PASS del piloto gobernante ni de la corrida gobernante completa: ambos
 exigen los cutouts reales de P2-005 y todavía no se ejecutaron.
+
+## -2. Tercera observación corregida: fallo de colección bajo entorno canónico
+
+La revisión independiente de Andrés, ejecutada bajo el entorno canónico
+declarado por `requirements.txt` (Python 3.11.9, pytest **9.1.1**, con
+`torch`/`ultralytics` instalados), encontró un bloqueo real:
+`tests/test_make_synthetic_scenes.py` importa helpers desde
+`tests.test_assign_synthetic_sources`, pero `tests/` no tenía `__init__.py` y
+por lo tanto no era un paquete Python regular. Bajo pytest 9.1.1 esto produce
+`ModuleNotFoundError: No module named 'tests.test_assign_synthetic_sources'`
+durante la colección, y aborta antes de ejecutar los 71 tests de P2-007 (y, por
+la interrupción de colección, la suite completa).
+
+Reproducido literalmente en el entorno canónico antes de corregir:
+
+```
+$ .\.venv\Scripts\python.exe -m pytest tests/test_make_synthetic_scenes.py -q
+ERROR collecting tests/test_make_synthetic_scenes.py
+ModuleNotFoundError: No module named 'tests.test_assign_synthetic_sources'
+1 error in 2.06s
+(exit code 2)
+```
+
+**Corrección aplicada:** se agregó `tests/__init__.py` (archivo vacío). Con
+`tests/` reconocido como paquete regular, pytest (modo de import "prepend",
+sin configuración explícita en el repo) inserta la **raíz del repositorio**
+—no `tests/`— al frente de `sys.path` e importa el módulo como
+`tests.test_make_synthetic_scenes`; `from tests.test_assign_synthetic_sources
+import ...` resuelve correctamente porque la raíz del repo ya está en
+`sys.path`.
+
+No se usó ninguna de las soluciones prohibidas: no se bajó la versión de
+pytest, no se tocó `PYTHONPATH`, no se usó
+`--continue-on-collection-errors`, no se marcó nada `skip`/`xfail`, y no se
+ocultó el error de colección de ninguna otra forma. Es el único archivo de
+código/test modificado en esta corrección; no se tocó lógica productiva de
+P2-006/P2-007 ni ningún archivo bajo `docs/governance/03_PHASE2/`.
+
+Verificado tras la corrección, en el mismo entorno canónico:
+
+```
+$ .\.venv\Scripts\python.exe -m pytest tests/test_make_synthetic_scenes.py -q
+71 passed in 12.77s
+(exit code 0)
+```
 
 ## -1. Segunda observación corregida: procedencia del piloto de fixtures
 
@@ -68,6 +114,7 @@ corrige los 7 puntos señalados, manteniendo el diseño original:
 | `src/data/make_synthetic_scenes.py` | P2-007 | Compositor de escenas, geometría de oclusión, verificación de hash de cutout, gates obligatorios, QA automático, modo piloto |
 | `tests/test_assign_synthetic_sources.py` | P2-006 | 33 tests |
 | `tests/test_make_synthetic_scenes.py` | P2-007 | 71 tests |
+| `tests/__init__.py` | infraestructura de test | archivo vacío; hace de `tests/` un paquete regular para que `pytest` 9.1.1 pueda resolver `from tests.test_assign_synthetic_sources import ...` (§-2) |
 
 Ningún archivo bajo `docs/governance/03_PHASE2/` fue modificado.
 `MANIFEST_SHA256.txt` no fue modificado.
@@ -76,6 +123,10 @@ declaradas en `requirements.txt`.
 
 ## 2. Entorno observado
 
+Dos entornos distintos se usaron a lo largo de la historia de este PR:
+
+**Entorno original (§0/§-1, commits `3ea3488`/`2ad7d58`/`c6c6fbd`):**
+
 ```
 Python 3.11.9
 numpy 2.4.4
@@ -83,11 +134,25 @@ pillow 12.2.0
 pytest 9.0.3
 ```
 
-Nota honesta: el entorno donde se ejecutaron estas pruebas tiene versiones
-ligeramente anteriores a los pines de `requirements.txt` (numpy 2.4.6,
-pillow 12.3.0, pytest 9.1.1), y **no** tiene `torch`/`ultralytics` instalados.
-Esto no afecta a P2-006/P2-007 (que no importan torch) pero sí explica los dos
-fallos preexistentes documentados en §7.
+Versiones ligeramente anteriores a los pines de `requirements.txt`
+(numpy 2.4.6, pillow 12.3.0, pytest 9.1.1), y **sin** `torch`/`ultralytics`
+instalados.
+
+**Entorno canónico (§-2 y §6/§7 de esta corrección, verificado con
+`.\.venv\Scripts\python.exe`):**
+
+```
+Python 3.11.9
+pytest 9.1.1
+torch 2.13.0+cpu
+ultralytics 8.4.120
+```
+
+Coincide exactamente con los pines de `requirements.txt`. Es el entorno bajo
+el cual Andrés reprodujo el bloqueo de colección de §-2, y es el que se usa
+para el resultado de pruebas reportado en §6/§7 a partir de esta corrección
+(reemplaza, no complementa, los resultados anteriores del entorno original en
+cuanto a autoridad: éste es el entorno canónico del proyecto).
 
 ## 3. P2-006 — Asignación determinista
 
@@ -378,58 +443,109 @@ un revisor distinto que exige el gate P2-G2.
 
 ## 6. Resultado de pruebas observado
 
-Reconfirmado en esta corrección (mismo código, HEAD `2ad7d58`, sin cambios de
-código en esta revisión — solo se corrigió la evidencia documental):
+### 6.1 Entorno canónico (autoridad de esta corrección — `.\.venv\Scripts\python.exe`)
+
+Python 3.11.9, pytest 9.1.1, torch 2.13.0+cpu, ultralytics 8.4.120, con
+`tests/__init__.py` ya aplicado (§-2):
 
 ```
-$ python -m pytest tests/test_assign_synthetic_sources.py -q
-33 passed in 0.48s
+$ .\.venv\Scripts\python.exe --version
+Python 3.11.9
+
+$ .\.venv\Scripts\python.exe -m pytest --version
+pytest 9.1.1
+
+$ .\.venv\Scripts\python.exe -c "import torch, ultralytics; print(torch.__version__, ultralytics.__version__)"
+2.13.0+cpu 8.4.120
+
+$ .\.venv\Scripts\python.exe -m pytest tests/test_assign_synthetic_sources.py -q
+33 passed in 0.56s
 (exit code 0)
 
-$ python -m pytest tests/test_make_synthetic_scenes.py -q
-71 passed in 12.27s
+$ .\.venv\Scripts\python.exe -m pytest tests/test_make_synthetic_scenes.py -q
+71 passed in 12.67s
 (exit code 0)
 
-$ python -m pytest -q
-2 failed, 198 passed, 1 skipped in 15.69s
+$ .\.venv\Scripts\python.exe -m pytest -q
+1 failed, 200 passed in 42.86s
 (exit code 1)
 
 $ git diff --check
 (sin salida)
 (exit code 0)
+
+$ git status --short
+?? tests/__init__.py
 ```
 
-**La suite completa del repositorio sigue en estado FAIL (código de salida 1)**
-en este entorno. No se declara `FULL_TESTS=155/155 PASS` ni ninguna variante
-agregada que oculte los 2 fallos: el resultado exacto es
-`2 failed, 198 passed, 1 skipped`. Los conteos son idénticos a los medidos en
-el commit `2ad7d58` (código sin cambios en esta corrección documental).
+**La suite completa sigue en estado FAIL (código de salida 1) en el entorno
+canónico.** No se declara PASS agregado. El único fallo es
+`tests/test_scraper_extraction.py::TestScraperExtraction::test_s02_incomplete_config_fails`,
+por un problema de codificación (`assertIn("Falta la sección obligatoria",
+result.stderr)` no encuentra el texto porque el subproceso hijo emite
+`stderr` con una codificación distinta a UTF-8 en este entorno de consola de
+Windows — el texto real capturado es `'Falta la secciÃ³n obligatoria...'`,
+mojibake de la cadena UTF-8 original). Es ajeno por completo a P2-006/P2-007;
+ver §7 para la verificación de que es preexistente.
+
+Bajo el entorno canónico, con `torch`/`ultralytics` instalados, los dos
+fallos que documentaba la versión anterior de esta evidencia
+(`test_train_evaluate_cli.py::test_01`/`test_04`, por
+`ModuleNotFoundError: No module named 'torch'`) **ya no ocurren**: ese era un
+síntoma del entorno original (§2), no del entorno canónico.
+
+### 6.2 Entorno original (histórico, commits `2ad7d58`/`c6c6fbd`, para trazabilidad)
+
+Para referencia, el resultado obtenido en el entorno original antes de esta
+corrección (Python 3.11.9, pytest 9.0.3, sin torch/ultralytics):
+
+```
+33 passed / 71 passed / 2 failed, 198 passed, 1 skipped (exit code 1)
+```
+
+Ese entorno no reproducía el bloqueo de colección de §-2 (con pytest 9.0.3 el
+import de `tests.test_assign_synthetic_sources` resolvía sin necesitar
+`tests/__init__.py`), por eso el bloqueo pasó inadvertido hasta la revisión
+independiente de Andrés bajo pytest 9.1.1.
 
 ## 7. Fallos preexistentes (no introducidos por esta rama)
 
-Los dos fallos de la suite completa son de `tests/test_train_evaluate_cli.py` y
-existen en `origin/main` sin ninguna de estas modificaciones. Verificado en un
-worktree limpio sobre `3b4b97d`:
+### 7.1 `test_s02_incomplete_config_fails` (entorno canónico)
+
+Verificado en un worktree limpio y desechable sobre `origin/main`
+(`3b4b97d`), usando el mismo `.\.venv\Scripts\python.exe` canónico:
 
 ```
-$ python -m pytest -q          # worktree limpio en origin/main
-2 failed, 94 passed, 1 skipped in 2.74s
+$ .\.venv\Scripts\python.exe -m pytest -q     # worktree limpio en origin/main
+1 failed, 96 passed in 25.71s
 (exit code 1)
 
-FAILED tests/test_train_evaluate_cli.py::...::test_01_smoke_train_produce_artefactos_contractuales
-FAILED tests/test_train_evaluate_cli.py::...::test_04_evaluacion_repetida_sobre_mismo_peso_es_identica
+FAILED tests/test_scraper_extraction.py::TestScraperExtraction::test_s02_incomplete_config_fails
 ```
 
-Causa raíz observada: `ModuleNotFoundError: No module named 'torch'` en
-`src/train.py:110`. `test_04` falla en cascada porque `test_01` no produjo los
-pesos. Es una carencia del entorno local (torch/ultralytics no instalados), no
-una regresión de código; no se instaló ninguna dependencia para ocultar o evitar
-este resultado (prohibido por las instrucciones de esta revisión).
+Mismo fallo, misma traza, mismo mojibake — presente en `origin/main` sin
+ninguna modificación de esta rama. Es una carencia de codificación del
+entorno local (probablemente `PYTHONIOENCODING`/codepage de la consola de
+Windows en la máquina de ejecución), no una regresión de código introducida
+por P2-006/P2-007. El worktree de verificación se eliminó (`git worktree
+remove`) tras la comprobación.
 
-Diferencia neta: 94 → 198 tests aprobados, es decir los 104 tests nuevos
-(33 de P2-006 + 71 de P2-007). El estado agregado de la suite (`FAIL`, código 1)
-es idéntico antes y después de esta rama: los mismos 2 tests preexistentes
-fallan por la misma causa, ni uno más ni uno menos.
+### 7.2 `test_01_smoke_train_produce_artefactos_contractuales` / `test_04` (entorno original, sin torch)
+
+Estos dos fallos, documentados en versiones anteriores de esta evidencia, eran
+específicos del entorno original (§2), que no tenía `torch`/`ultralytics`
+instalados (`ModuleNotFoundError: No module named 'torch'` en
+`src/train.py:110`). Bajo el entorno canónico (§6.1), con torch instalado,
+estos dos tests **pasan**. No se investigan más aquí porque ya no reproducen
+en el entorno de referencia del proyecto.
+
+### 7.3 Resumen
+
+Diferencia neta bajo el entorno canónico: 96 → 200 tests aprobados en el
+worktree de P2-006/P2-007, es decir los 104 tests nuevos (33 de P2-006 + 71
+de P2-007). El estado agregado de la suite (`FAIL`, código 1) es idéntico
+antes y después de esta rama: el mismo test preexistente (`test_s02_...`)
+falla por la misma causa, ni uno más ni uno menos.
 
 ## 8. Estado y qué falta
 
@@ -446,11 +562,12 @@ fallan por la misma causa, ni uno más ni uno menos.
 | Consistencia de linaje/difficulty/seed/n_products dentro de escena y entre escenas | Sí |
 | Piloto de fixtures 30 escenas | Sí (10 basic / 10 medium / 10 hard), reejecutado realmente en HEAD `2ad7d58` con `--generator-commit` correcto |
 | Procedencia del piloto de fixtures (`GENERATOR_COMMIT`) | Corregida: coincide con el HEAD real que lo generó (`2ad7d58eda4506003cb793fc39e853ff7f42ed5c`) |
+| Colección de tests bajo entorno canónico (pytest 9.1.1) | Corregida: `tests/__init__.py` agregado; `ModuleNotFoundError` resuelto |
 | Piloto **real** con cutouts de P2-005 | **NO EJECUTADO** |
 | Corrida completa de 655 escenas reales | **NO EJECUTADA** (bloqueada por P2-005 y P2-008) |
 | Revisión visual por revisor no autor | **PENDIENTE** |
 | Gate P2-G2 | **NO CERRADO** |
-| Suite completa del repositorio | **FAIL** (2 fallos preexistentes de entorno, ajenos a P2-006/P2-007) |
+| Suite completa del repositorio (entorno canónico) | **FAIL** (1 fallo preexistente de codificación en `test_scraper_extraction.py`, ajeno a P2-006/P2-007, verificado también en `origin/main`) |
 
 Secuencia pendiente: P2-005 cutouts READY/PASS → rehacer P2-006 con el
 manifiesto real (incluida su columna de categoría real, cuando P2-003/004 la
@@ -462,6 +579,10 @@ GENERATOR_CODE_COMMIT=2ad7d58eda4506003cb793fc39e853ff7f42ed5c
 PILOT_FIXTURE_RERUN=PASS
 PILOT_REAL=NOT_RUN
 FULL_GOVERNING_RUN=NOT_RUN
+IMPORT_COLLECTION_FIX=tests/__init__.py agregado (paquete regular, sin PYTHONPATH/downgrade/skip)
+P2_006_TESTS_CANONICAL=33/33 PASS (pytest 9.1.1)
+P2_007_TESTS_CANONICAL=71/71 PASS (pytest 9.1.1)
+FULL_SUITE_CANONICAL=1 failed, 200 passed (exit code 1) — fallo preexistente ajeno a P2-006/P2-007
 ```
 
 `P2-006_IMPLEMENTATION=READY_FOR_REVIEW`, `P2-006_GOVERNING_RUN=NOT_RUN`,
