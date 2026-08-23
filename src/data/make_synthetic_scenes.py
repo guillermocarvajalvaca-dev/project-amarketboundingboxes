@@ -15,6 +15,12 @@ Principios:
   sobre el rectángulo del objeto transformado (§7 del contrato de generación);
 - el número de objetos por escena nunca se reduce en silencio: si la escena no
   cumple las restricciones, se regenera; si se agotan los intentos, falla fuerte;
+- el muestreo de cada objeto valida su oclusión sobre los objetos YA colocados
+  antes de aceptarlo (condición necesaria, no solo heurística: los objetos
+  colocados después solo pueden aumentar esa oclusión); si ningún muestreo de
+  MAX_PLACEMENT_SAMPLES lo logra, la escena completa se reintenta bajo el
+  siguiente sub-seed — el chequeo final tras componer toda la escena sigue
+  siendo la autoridad;
 - ninguna ruta absoluta ni con traversal se acepta ni se escribe en el manifiesto;
 - no hay filtros generativos: solo escalado, rotación y alpha compositing;
 - el gate anti-fuga (allowlist train/accepted) y la procedencia del generador
@@ -75,6 +81,14 @@ DIFFICULTY_RULES = {
 # Cotas de reintento (06_SYNTHETIC §6: "bounded placement retries").
 MAX_SCENE_ATTEMPTS = 64
 MAX_PLACEMENT_SAMPLES = 64
+
+# Presupuesto total y explícito para el fallback estructurado con
+# backtracking DENTRO de un intento de escena. No reemplaza MAX_SCENE_ATTEMPTS
+# ni MAX_PLACEMENT_SAMPLES: es un tercer límite, acotado y documentado, sobre
+# cuántos candidatos (aleatorios + estructurados, de todos los objetos) se
+# evalúan en total antes de que el intento se rinda y el reintento por
+# sub-seed siguiente se haga cargo (06_SYNTHETIC §6).
+STRUCTURED_SEARCH_BUDGET = 4000
 
 DEFAULT_BACKGROUND_RGB = (255, 255, 255)
 
@@ -443,70 +457,405 @@ def enforce_occlusion_limits(visibility, max_occlusion):
             )
 
 
+def _mask_fast_fields(mask):
+    """Precalculados por candidato para el chequeo de oclusión (una vez,
+    nunca por evaluación): área transformada, bounding box de FOREGROUND (en
+    coordenadas locales de la máscara, distinta de la caja del array cuando
+    la rotación agregó relleno transparente) y si la máscara es completamente
+    sólida (todo píxel del array es foreground — el caso del rectángulo opaco
+    sin rotar).
+
+    Requiere máscara con foreground (los creadores de candidatos ya filtran
+    las vacías).
+    """
+    rows = np.flatnonzero(mask.any(axis=1))
+    cols = np.flatnonzero(mask.any(axis=0))
+    fg_bbox = (int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
+    area = int(mask.sum())
+    height, width = mask.shape
+    return area, area == width * height, fg_bbox
+
+
+def _fits_without_violating_occlusion(existing, candidate, max_occlusion):
+    """¿Apilar un candidato encima de `existing` mantiene a los objetos ya
+    colocados dentro del límite de oclusión?
+
+    Es una condición NECESARIA, no solo heurística: los objetos que se
+    coloquen después del candidato solo pueden aumentar la oclusión de los ya
+    colocados (la unión de máscaras por encima nunca decrece), así que si ya
+    se viola aquí con un subconjunto de la pila final, seguirá violado en la
+    composición final. El candidato mismo no se evalúa: todavía nada lo cubre.
+
+    Costo por evaluación, de más barato a más caro (el presupuesto de
+    búsqueda es de miles de candidatos por intento):
+    1) intersección de los bounding boxes de FOREGROUND (enteros puros, sin
+       numpy): si no se cruzan, overlap=0 y se pasa al siguiente;
+    2) si AMBAS máscaras son sólidas y el existente sigue íntegro
+       (visible_area == transformed_area implica visible_mask == máscara
+       original, ambas sólidas), el solape ES el rectángulo de intersección:
+       aritmética de rectángulos, sin numpy;
+    3) si no, `np.count_nonzero` sobre ÚNICAMENTE los slices del ROI
+       solapado (coordenadas locales de cada máscara); nunca sobre máscaras
+       de lienzo completo.
+
+    `existing` es una lista de dicts con el estado YA CACHEADO de cada objeto
+    comprometido (bbox, fg_bbox, solidez, máscara visible ACTUAL de lienzo
+    completo, áreas) — se actualiza solo al comprometer/deshacer un objeto
+    (`_commit_candidate`/`_undo_last_commit`), nunca en cada evaluación.
+    """
+    local_mask = candidate["local_mask"]
+    cx0, cy0 = candidate["x"], candidate["y"]
+    cfx0, cfy0, cfx1, cfy1 = candidate["fg_bbox"]
+    cand_solid = candidate["solid"]
+    for item in existing:
+        ex0, ey0, ex1, ey1 = item["fg_bbox"]
+        ix0, iy0 = max(ex0, cx0 + cfx0), max(ey0, cy0 + cfy0)
+        ix1, iy1 = min(ex1, cx0 + cfx1), min(ey1, cy0 + cfy1)
+        if ix0 >= ix1 or iy0 >= iy1:
+            continue  # los rectángulos no se cruzan: overlap=0
+        if (
+            cand_solid
+            and item["solid"]
+            and item["visible_area"] == item["transformed_area"]
+        ):
+            # Regiones relevantes sólidas e íntegras: el solape es exacto por
+            # aritmética del rectángulo de intersección.
+            overlap = (ix1 - ix0) * (iy1 - iy0)
+        else:
+            region_existing = item["visible_mask"][iy0:iy1, ix0:ix1]
+            region_candidate = local_mask[iy0 - cy0: iy1 - cy0, ix0 - cx0: ix1 - cx0]
+            overlap = int(np.count_nonzero(region_existing & region_candidate))
+        if overlap == 0:
+            continue
+        new_visible = item["visible_area"] - overlap
+        if new_visible <= 0:
+            return False
+        if (1.0 - new_visible / item["transformed_area"]) > max_occlusion:
+            return False
+    return True
+
+
+def _commit_candidate(existing, candidate, canvas_mask, bbox):
+    """Compromete `canvas_mask` (lienzo completo) ENCIMA de todo lo existente.
+
+    Actualiza en el momento (no en cada intento de candidato) la máscara/área
+    visible cacheada de cada objeto ya comprometido, restringido a la
+    intersección de bounding boxes por eficiencia. El estado del nuevo objeto
+    reutiliza los precalculados del candidato (`_mask_fast_fields`): área
+    transformada, solidez y bounding box de foreground trasladado a
+    coordenadas de lienzo.
+    """
+    x0, y0, x1, y1 = bbox
+    for item in existing:
+        ex0, ey0, ex1, ey1 = item["bbox"]
+        ix0, iy0 = max(ex0, x0), max(ey0, y0)
+        ix1, iy1 = min(ex1, x1), min(ey1, y1)
+        if ix0 >= ix1 or iy0 >= iy1:
+            continue
+        region_existing = item["visible_mask"][iy0:iy1, ix0:ix1]
+        region_new = canvas_mask[iy0:iy1, ix0:ix1]
+        overlap = region_existing & region_new
+        removed = int(np.count_nonzero(overlap))
+        if removed:
+            region_existing &= ~overlap
+            item["visible_area"] -= removed
+    area = candidate["transformed_area"]
+    fx0, fy0, fx1, fy1 = candidate["fg_bbox"]
+    existing.append({
+        "canvas_mask": canvas_mask,
+        "visible_mask": canvas_mask.copy(),
+        "visible_area": area,
+        "transformed_area": area,
+        "bbox": bbox,
+        "solid": candidate["solid"],
+        "fg_bbox": (x0 + fx0, y0 + fy0, x0 + fx1, y0 + fy1),
+    })
+
+
+def _undo_last_commit(existing):
+    """Deshace el último `_commit_candidate` (backtracking).
+
+    Recalcula la máscara visible cacheada de los objetos restantes desde sus
+    máscaras de lienzo completo (`compute_visibility`, ya probado) — un costo
+    O(objetos restantes) que solo se paga en cada paso de backtracking, nunca
+    por candidato evaluado.
+    """
+    existing.pop()
+    if not existing:
+        return
+    canvas_masks = [item["canvas_mask"] for item in existing]
+    visibility = compute_visibility(canvas_masks)
+    for item, vis in zip(existing, visibility):
+        item["visible_mask"] = vis["visible_mask"]
+        item["visible_area"] = vis["visible_area"]
+
+
+def _structured_scale_rotation_grid(scale_lo, scale_hi, rot_lo, rot_hi):
+    """Combinaciones deterministas de (scale, rotation), compactas primero.
+
+    Prioriza escala mínima (huella más chica) y rotación cero (no agranda el
+    bounding box) para maximizar la chance de encajar sin violar oclusión.
+    Puramente determinista a partir de los límites de la dificultad: no
+    consume el rng de la escena.
+    """
+    scale_mid = (scale_lo + scale_hi) / 2.0
+    for scale in (scale_lo, scale_mid, scale_hi):
+        for rotation in (0.0, rot_hi / 2.0, rot_lo / 2.0, rot_hi, rot_lo):
+            yield scale, rotation
+
+
+def _structured_position_grid(width, height, existing_bboxes):
+    """Posiciones deterministas: esquinas, bordes, centro y adyacentes a los
+    objetos ya colocados, en ese orden de prioridad.
+
+    `existing_bboxes` son las cajas (x0, y0, x1, y1) de los objetos YA
+    comprometidos en este intento de búsqueda; cambia con el backtracking,
+    así que las posiciones "adyacentes" siempre reflejan el estado actual.
+    """
+    max_x = CANVAS_WIDTH - width
+    max_y = CANVAS_HEIGHT - height
+    seen = set()
+
+    def emit(x, y):
+        if 0 <= x <= max_x and 0 <= y <= max_y and (x, y) not in seen:
+            seen.add((x, y))
+            return (x, y)
+        return None
+
+    anchors = [
+        (0, 0), (max_x, 0), (0, max_y), (max_x, max_y),
+        (max_x // 2, 0), (max_x // 2, max_y),
+        (0, max_y // 2), (max_x, max_y // 2),
+        (max_x // 2, max_y // 2),
+    ]
+    for x, y in anchors:
+        point = emit(x, y)
+        if point:
+            yield point
+
+    for (ex0, ey0, ex1, ey1) in existing_bboxes:
+        for x, y in ((ex1, ey0), (ex0 - width, ey0), (ex0, ey1), (ex0, ey0 - height)):
+            point = emit(x, y)
+            if point:
+                yield point
+
+
+def _precompute_structured_geometry(rgba, rules):
+    """Geometrías (scale, rotation_deg, transformed, mask + precalculados)
+    del fallback estructurado para UN objeto, calculadas UNA sola vez por
+    intento.
+
+    El backtracking puede visitar el mismo objeto muchas veces (su generador
+    de candidatos se recrea cada vez que se retrocede y se vuelve a avanzar
+    hasta él); estas geometrías no dependen de qué haya colocado ya (solo de
+    scale/rotation, fijos por dificultad), así que precomputarlas evita
+    repetir transformaciones de imagen (PIL) costosas en cada recreación.
+    Cada geometría lleva además los campos rápidos del chequeo de oclusión
+    (`_mask_fast_fields`): área transformada, solidez y fg bbox.
+    """
+    scale_lo, scale_hi = rules["scale"]
+    rot_lo, rot_hi = rules["rotation"]
+    geoms = []
+    for scale, rotation_deg in _structured_scale_rotation_grid(scale_lo, scale_hi, rot_lo, rot_hi):
+        transformed, mask = transform_cutout(rgba, scale, rotation_deg)
+        height, width = mask.shape
+        if width > CANVAS_WIDTH or height > CANVAS_HEIGHT or not mask.any():
+            continue
+        area, solid, fg_bbox = _mask_fast_fields(mask)
+        geoms.append(
+            (scale, rotation_deg, transformed, mask, width, height, area, solid, fg_bbox)
+        )
+    return geoms
+
+
+def _draw_random_candidates(rgba, rules, rng):
+    """Sortea y transforma UNA sola vez la fase aleatoria de un objeto.
+
+    Materializa hasta MAX_PLACEMENT_SAMPLES candidatos con el muestreo
+    idéntico al original — mismo orden de consumo del rng: por sorteo,
+    uniform(scale), uniform(rotation) y, solo si el objeto transformado cabe
+    en el lienzo, randint(x), randint(y). El resultado se cachea por objeto
+    e intento en `_compose_attempt`: cuando el backtracking recrea el
+    generador del mismo objeto, este re-itera la lista cacheada en vez de
+    re-ejecutar las transformaciones PIL (que dominan el costo de la
+    búsqueda) y sin consumir rng adicional.
+    """
+    scale_lo, scale_hi = rules["scale"]
+    rot_lo, rot_hi = rules["rotation"]
+
+    candidates = []
+    for _ in range(MAX_PLACEMENT_SAMPLES):
+        scale = rng.uniform(scale_lo, scale_hi)
+        rotation_deg = rng.uniform(rot_lo, rot_hi)
+        transformed, mask = transform_cutout(rgba, scale, rotation_deg)
+        height, width = mask.shape
+        if width > CANVAS_WIDTH or height > CANVAS_HEIGHT or not mask.any():
+            continue
+        x = rng.randint(0, CANVAS_WIDTH - width)
+        y = rng.randint(0, CANVAS_HEIGHT - height)
+        area, solid, fg_bbox = _mask_fast_fields(mask)
+        candidates.append({
+            "scale": scale, "rotation_deg": rotation_deg, "rgba": transformed,
+            "local_mask": mask, "x": x, "y": y, "width": width, "height": height,
+            "transformed_area": area, "solid": solid, "fg_bbox": fg_bbox,
+        })
+    return candidates
+
+
+def _object_candidate_generator(random_candidates, existing_bboxes, structured_geoms):
+    """Candidatos para UN objeto, en orden de prioridad decreciente:
+
+    1) los candidatos aleatorios YA sorteados y transformados una sola vez
+       por objeto e intento (`_draw_random_candidates`): se re-iteran tal
+       cual cada vez que el backtracking recrea este generador — mismas
+       muestras, mismo orden, sin repetir transformaciones ni consumir rng
+       adicional;
+    2) si ninguno funciona, el fallback estructurado PRECOMPUTADO
+       (`structured_geoms`, ver `_precompute_structured_geometry`): escala/
+       rotación compactas primero, posiciones en esquinas, bordes, centro y
+       adyacentes a lo ya colocado. No consume rng.
+
+    No evalúa oclusión aquí: el llamador decide con el estado actual de la
+    búsqueda (necesario para permitir backtracking).
+    """
+    for candidate in random_candidates:
+        yield candidate
+
+    for (
+        scale, rotation_deg, transformed, mask, width, height,
+        area, solid, fg_bbox,
+    ) in structured_geoms:
+        for x, y in _structured_position_grid(width, height, existing_bboxes):
+            yield {
+                "scale": scale, "rotation_deg": rotation_deg, "rgba": transformed,
+                "local_mask": mask, "x": x, "y": y, "width": width, "height": height,
+                "transformed_area": area, "solid": solid, "fg_bbox": fg_bbox,
+            }
+
+
+def _object_search_order(placements, cutouts):
+    """Orden de colocación (y de z_order): objetos más GRANDES primero.
+
+    Heurística estándar de bin-packing: el objeto más difícil de encajar se
+    coloca cuando el lienzo está más despejado. El tamaño se mide en píxeles
+    del cutout FUENTE (ancho*alto, antes de escalar) — estable y determinista,
+    no depende de ningún muestreo. Empates se resuelven por placement_index
+    ascendente para reproducibilidad total.
+
+    Este orden pasa a ser el z_order final y puede diferir de placement_index;
+    por eso se documenta aquí explícitamente y cada fila del manifiesto sigue
+    registrando AMBOS valores por separado (placement_index identifica la
+    fuente/linaje; z_order identifica el apilado real).
+    """
+    def size_key(placement):
+        rgba = cutouts[placement["source_asset_id"]]
+        area = rgba.shape[0] * rgba.shape[1]
+        return (-area, placement["placement_index"])
+
+    return sorted(placements, key=size_key)
+
+
 def _compose_attempt(scene_spec, cutouts, rng):
     """Un intento de composición de escena. Lanza SceneRejected si no cumple.
 
-    Devuelve la lista de objetos colocados con su geometría y máscara visible.
+    Coloca los objetos en orden de tamaño descendente (`_object_search_order`)
+    — ese orden ES el z_order final. Cada objeto prueba primero muestreo
+    aleatorio (idéntico al algoritmo original) y, si se agota, un fallback
+    estructurado determinista. Si tampoco encaja, BACKTRACKING acotado:
+    se descarta el objeto anterior y se prueba su siguiente candidato (su
+    generador queda vivo y pausado, así que retoma donde iba, sin repetir
+    candidatos ya probados). Todo el intento comparte un presupuesto total y
+    finito de candidatos evaluados (STRUCTURED_SEARCH_BUDGET); si se agota,
+    el intento se rechaza y el reintento de escena completa por sub-seed
+    siguiente (06_SYNTHETIC §6: "bounded placement retries") sigue siendo el
+    respaldo final — nunca se reduce el número de objetos.
+
+    Devuelve la lista de objetos colocados, en orden ascendente de z_order,
+    con su geometría y máscara visible.
     """
     rules = DIFFICULTY_RULES[scene_spec["difficulty"]]
-    scale_lo, scale_hi = rules["scale"]
-    rot_lo, rot_hi = rules["rotation"]
     max_occlusion = rules["max_occlusion"]
 
-    placed = []
-    for placement in scene_spec["placements"]:
-        rgba = cutouts[placement["source_asset_id"]]
+    search_order = _object_search_order(scene_spec["placements"], cutouts)
+    n = len(search_order)
 
-        # Muestreo acotado: si el objeto transformado no cabe en el lienzo se
-        # vuelve a muestrear; el rng avanza, así que la secuencia sigue siendo
-        # determinista para (scene_seed, attempt).
-        fitted = None
-        for _ in range(MAX_PLACEMENT_SAMPLES):
-            scale = rng.uniform(scale_lo, scale_hi)
-            rotation_deg = rng.uniform(rot_lo, rot_hi)
-            transformed, mask = transform_cutout(rgba, scale, rotation_deg)
-            height, width = mask.shape
-            if width > CANVAS_WIDTH or height > CANVAS_HEIGHT:
-                continue
-            if not mask.any():
-                continue
-            x = rng.randint(0, CANVAS_WIDTH - width)
-            y = rng.randint(0, CANVAS_HEIGHT - height)
-            fitted = {
-                "placement": placement,
-                "scale": scale,
-                "rotation_deg": rotation_deg,
-                "rgba": transformed,
-                "local_mask": mask,
-                "x": x,
-                "y": y,
-                "width": width,
-                "height": height,
-            }
-            break
-
-        if fitted is None:
-            raise SceneRejected(
-                f"escena {scene_spec['scene_id']}: no se pudo encajar el objeto "
-                f"{placement['placement_index']} dentro del lienzo"
-            )
-        placed.append(fitted)
-
-    # z-order determinista: el orden de placement es el orden de apilado;
-    # z_order mayor = más arriba.
-    for z_order, obj in enumerate(placed):
-        obj["z_order"] = z_order
-
-    # Máscaras a lienzo completo, en orden ascendente de z_order.
-    canvas_masks = [
-        build_canvas_mask(obj["local_mask"], obj["x"], obj["y"]) for obj in placed
+    # Precomputado UNA vez por objeto (no por cada recreación del generador
+    # al hacer backtracking): ver _precompute_structured_geometry.
+    structured_geoms_by_level = [
+        _precompute_structured_geometry(cutouts[p["source_asset_id"]], rules)
+        for p in search_order
     ]
 
+    generators = [None] * n
+    random_by_level = [None] * n  # fase aleatoria materializada UNA vez por intento
+    committed = [None] * n
+    existing = []  # estado cacheado (bbox/visible_mask/áreas), ver _commit_candidate
+    existing_bboxes = []  # espejo liviano de existing[*]["bbox"] para el generador de candidatos
+    evaluated = 0
+
+    level = 0
+    while 0 <= level < n:
+        placement = search_order[level]
+        if generators[level] is None:
+            # La fase aleatoria se sortea/transforma UNA sola vez por objeto
+            # e intento (ver _draw_random_candidates): las recreaciones del
+            # generador por backtracking re-iteran la lista cacheada, sin
+            # repetir transformaciones PIL ni consumir rng adicional.
+            if random_by_level[level] is None:
+                rgba = cutouts[placement["source_asset_id"]]
+                random_by_level[level] = _draw_random_candidates(rgba, rules, rng)
+            generators[level] = _object_candidate_generator(
+                random_by_level[level],
+                existing_bboxes,
+                structured_geoms_by_level[level],
+            )
+
+        accepted = None
+        for candidate in generators[level]:
+            evaluated += 1
+            if evaluated > STRUCTURED_SEARCH_BUDGET:
+                raise SceneRejected(
+                    f"escena {scene_spec['scene_id']}: presupuesto de búsqueda "
+                    f"({STRUCTURED_SEARCH_BUDGET}) agotado en el objeto "
+                    f"{placement['placement_index']}"
+                )
+            if _fits_without_violating_occlusion(existing, candidate, max_occlusion):
+                accepted = candidate
+                break
+
+        if accepted is None:
+            # Backtracking acotado: se agota este objeto; se descarta su
+            # generador y se retrocede al anterior para probar su SIGUIENTE
+            # candidato (su generador sigue vivo, pausado donde iba).
+            generators[level] = None
+            committed[level] = None
+            level -= 1
+            if level < 0:
+                raise SceneRejected(
+                    f"escena {scene_spec['scene_id']}: backtracking agotado sin "
+                    f"lograr colocar todos los objetos respetando la oclusión"
+                )
+            _undo_last_commit(existing)
+            existing_bboxes.pop()
+            committed[level] = None
+            continue
+
+        x, y, width, height = accepted["x"], accepted["y"], accepted["width"], accepted["height"]
+        bbox = (x, y, x + width, y + height)
+        canvas_mask = build_canvas_mask(accepted["local_mask"], x, y)
+        fitted = dict(accepted, placement=placement, z_order=level, canvas_mask=canvas_mask)
+        committed[level] = fitted
+        _commit_candidate(existing, accepted, canvas_mask, bbox)
+        existing_bboxes.append(bbox)
+        level += 1
+
+    placed = committed  # ascendente de z_order == orden de búsqueda (tamaño desc.)
+
+    canvas_masks = [obj["canvas_mask"] for obj in placed]
     visibility = compute_visibility(canvas_masks)
     enforce_occlusion_limits(visibility, max_occlusion)
 
-    for obj, canvas_mask, item in zip(placed, canvas_masks, visibility):
-        obj["canvas_mask"] = canvas_mask
+    for obj, item in zip(placed, visibility):
         obj["transformed_area"] = item["transformed_area"]
         obj["visible_mask"] = item["visible_mask"]
         obj["visible_area"] = item["visible_area"]

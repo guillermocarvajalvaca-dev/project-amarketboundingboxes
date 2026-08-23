@@ -27,6 +27,7 @@ from src.data.assign_synthetic_sources import (
     write_assignments,
 )
 from src.data.make_boxes import compute_yolo_box
+from src.data import make_synthetic_scenes as scenes_module
 from src.data.make_synthetic_scenes import (
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
@@ -52,6 +53,9 @@ from src.data.make_synthetic_scenes import (
     validate_outputs,
     validate_source_lineage_consistency,
     write_manifest,
+    _commit_candidate,
+    _fits_without_violating_occlusion,
+    _mask_fast_fields,
 )
 from tests.test_assign_synthetic_sources import (
     cutout_rows,
@@ -521,21 +525,39 @@ def test_rangos_de_transformacion_por_dificultad(tmp_path, difficulty, n_product
 # Nunca reducir el conteo: fallo fuerte
 # --------------------------------------------------------------------------
 
-def test_escena_imposible_falla_sin_reducir_objetos(tmp_path):
-    """Cutouts enormes en basic: el solape es inevitable y la escena debe fallar.
+def test_escena_imposible_falla_sin_reducir_objetos(tmp_path, monkeypatch):
+    """Dos cutouts tan grandes que NINGUNA posición relativa cumple oclusión.
 
-    El contrato prohíbe bajar n_products en silencio; se exige error explícito.
+    A escala mínima de basic (0.75) dos cuadrados de 1100 quedan en s=825px.
+    La oclusión mínima matemáticamente alcanzable entre dos cuadrados de lado
+    s en un lienzo de 1280 (colocándolos en esquinas opuestas) es
+    (2s-1280)^2/s^2 = (2*825-1280)^2/825^2 ≈ 0.20 (20%), muy por encima del
+    0.05 de basic — así que ni el muestreo aleatorio ni el fallback
+    estructurado (esquinas/bordes/centro) pueden encontrar una disposición
+    válida, sea cual sea la escala/rotación en rango. El contrato prohíbe
+    bajar n_products en silencio; se exige error explícito.
     """
     cutout_root = tmp_path / "big_cutouts"
     rows = cutout_rows(2)
     for row in rows:
-        rgba = make_rgba_rectangle(900, 900)
+        rgba = make_rgba_rectangle(1100, 1100)
         png_path = str(cutout_root / row["cutout_relative_path"])
         write_cutout_png(png_path, rgba)
         row["cutout_sha256"] = hashlib.sha256(open(png_path, "rb").read()).hexdigest()
     manifest_path = write_cutout_manifest(str(tmp_path / "big_manifest.csv"), rows)
 
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    # El objetivo del test es la SEMÁNTICA del fallo, no su repetición:
+    # verificar que una escena matemáticamente imposible lanza
+    # SceneGenerationError sin reducir planned_n_products y con un fallo
+    # acotado. Repetir 64 veces (MAX_SCENE_ATTEMPTS productivo) la misma
+    # imposibilidad geométrica no agrega cobertura a esa semántica y
+    # multiplica por 64 el costo del test, así que se baja a 1 intento SOLO
+    # durante este test vía monkeypatch; el valor productivo permanece en
+    # MAX_SCENE_ATTEMPTS=64. El fixture 1100×1100 y los asserts quedan
+    # intactos.
+    monkeypatch.setattr("src.data.make_synthetic_scenes.MAX_SCENE_ATTEMPTS", 1)
 
     with pytest.raises(SceneGenerationError, match="agotados"):
         run_generate_scenes(specs, str(cutout_root), str(tmp_path / "out"), manifest_path)
@@ -1215,3 +1237,297 @@ def test_cli_generator_commit_invalido_falla(tmp_path, capsys):
     ])
     assert exit_code == 1
     assert "FAIL" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Regresión del solver estructurado con backtracking (fix de rendimiento P2-008)
+# --------------------------------------------------------------------------
+
+# Cutouts sintéticos heterogéneos (el más grande replica el estrés del piloto
+# real; los moderados garantizan viabilidad rápida): fuerzan backtracking y
+# participación del fallback estructurado resolviendo en el primer intento.
+STRESS_SIZES = ((900, 900), (760, 620), (640, 520))
+
+
+def build_mixed_cutout_library(tmp_path, sizes, name="mixed_cutouts"):
+    """Crea cutouts PNG RGBA de tamaños DISTINTOS (uno por fuente) y su manifiesto.
+
+    Como build_cutout_library pero con tamaños heterogéneos, al estilo del
+    inventario real (un cutout muy grande + moderados), para estresar el
+    fallback estructurado sin volver la escena inviable.
+    """
+    cutout_root = tmp_path / name
+    rows = cutout_rows(len(sizes))
+    for index, (row, size) in enumerate(zip(rows, sizes)):
+        rgba = make_rgba_rectangle(size[0], size[1], rgb=(40 + index * 7 % 200, 90, 150))
+        png_path = str(cutout_root / row["cutout_relative_path"])
+        write_cutout_png(png_path, rgba)
+        row["cutout_sha256"] = hashlib.sha256(open(png_path, "rb").read()).hexdigest()
+    manifest_path = write_cutout_manifest(str(tmp_path / f"{name}_manifest.csv"), rows)
+    return str(cutout_root), manifest_path, rows
+
+
+def _fast_candidate(mask, x, y):
+    """Candidato mínimo con los precalculados de _mask_fast_fields."""
+    area, solid, fg_bbox = _mask_fast_fields(mask)
+    height, width = mask.shape
+    return {
+        "local_mask": mask, "x": x, "y": y, "width": width, "height": height,
+        "transformed_area": area, "solid": solid, "fg_bbox": fg_bbox,
+    }
+
+
+def _commit_existing(existing, candidate):
+    """Compromete un candidato vía _commit_candidate (estado real del solver)."""
+    x, y = candidate["x"], candidate["y"]
+    bbox = (x, y, x + candidate["width"], y + candidate["height"])
+    _commit_candidate(
+        existing, candidate, build_canvas_mask(candidate["local_mask"], x, y), bbox
+    )
+
+
+def _brute_force_fits(existing, candidate, max_occlusion):
+    """Referencia brute-force (la versión anterior a la optimización ROI):
+    logical_and de las máscaras de lienzo completo por objeto existente, sin
+    pre-filtro de bounding boxes ni fast path sólido."""
+    full = build_canvas_mask(candidate["local_mask"], candidate["x"], candidate["y"])
+    for item in existing:
+        overlap = int(np.logical_and(item["visible_mask"], full).sum())
+        if overlap == 0:
+            continue
+        new_visible = item["visible_area"] - overlap
+        if new_visible <= 0:
+            return False
+        if (1.0 - new_visible / item["transformed_area"]) > max_occlusion:
+            return False
+    return True
+
+
+def _structured_signatures(difficulty):
+    """(scale, rotation_deg) EXACTOS de la grilla estructurada, formateados
+    como aparecen en el manifiesto (6 decimales)."""
+    scale_lo, scale_hi = DIFFICULTY_RULES[difficulty]["scale"]
+    rot_lo, rot_hi = DIFFICULTY_RULES[difficulty]["rotation"]
+    return {
+        (f"{scale:.6f}", f"{rotation:.6f}")
+        for scale in (scale_lo, (scale_lo + scale_hi) / 2.0, scale_hi)
+        for rotation in (0.0, rot_hi / 2.0, rot_lo / 2.0, rot_hi, rot_lo)
+    }
+
+
+def test_roi_overlap_matches_bruteforce():
+    """El chequeo ROI optimizado es exactamente equivalente al brute-force.
+
+    Casos internos: pares sin cruce de rectángulos, máscaras sólidas (fast
+    path por aritmética de rectángulos), máscaras dispersas (conteo por ROI)
+    y máscaras cuyo bounding box cruza pero cuyo foreground no llega. Se
+    evalúa contra un existente íntegro y también parcialmente tapado (con
+    huecos en su máscara visible), barriendo el umbral de oclusión para que
+    la equivalencia fije el valor exacto del solape, no solo el booleano.
+    """
+    solid = np.ones((240, 320), dtype=bool)  # sólida completa
+    sparse = np.zeros((300, 300), dtype=bool)  # dispersa: franjas con huecos
+    for y in range(0, 300, 4):
+        sparse[y, :150] = True
+    for x in range(0, 300, 4):
+        sparse[:100, x] = True
+    right_fg = np.zeros((200, 360), dtype=bool)  # bbox ancho, fg solo a la derecha
+    right_fg[:, 240:] = True
+
+    existing_fresh = []
+    _commit_existing(existing_fresh, _fast_candidate(np.ones((260, 340), dtype=bool), 100, 100))
+
+    existing_holed = []
+    _commit_existing(existing_holed, _fast_candidate(np.ones((260, 340), dtype=bool), 100, 100))
+    # El segundo commit perfora la máscara visible del primero: el existente
+    # deja de estar íntegro y el fast path sólido ya no aplica contra él.
+    _commit_existing(existing_holed, _fast_candidate(sparse, 320, 220))
+
+    candidates = [
+        _fast_candidate(solid, 700, 700),  # sin cruce alguno
+        _fast_candidate(solid, 200, 200),  # sólida sobre sólida: fast path
+        _fast_candidate(sparse, 150, 150),  # dispersa sobre sólida: conteo ROI
+        _fast_candidate(sparse, 900, 200),  # sin cruce, dispersa
+        _fast_candidate(right_fg, 280, 80),  # el bbox del array cruza, el fg no
+        _fast_candidate(right_fg, 60, 80),  # el fg cruza parcialmente
+    ]
+    thresholds = (0.0, 0.02, 0.05, 0.10, 0.15, 0.30, 0.50, 0.80)
+    for existing in (existing_fresh, existing_holed):
+        for candidate in candidates:
+            for max_occlusion in thresholds:
+                assert _fits_without_violating_occlusion(
+                    existing, candidate, max_occlusion
+                ) == _brute_force_fits(existing, candidate, max_occlusion)
+
+
+def test_random_candidates_cached_across_backtracking(tmp_path, monkeypatch):
+    """Los candidatos aleatorios no se re-transforman al recrear un nivel.
+
+    Se instrumenta transform_cutout contando llamadas por origen — la grilla
+    estructurada usa exactamente scale_lo/mid/hi y rotaciones 0/±mitad/±extremo,
+    distinguibles de los sorteos uniformes — y se cuenta cada intento
+    (_compose_attempt) y cada paso de backtracking (_undo_last_commit). Con
+    cutouts grandes que fuerzan backtracking, la fase aleatoria debe
+    transformarse EXACTAMENTE MAX_PLACEMENT_SAMPLES=64 veces por objeto y por
+    intento, sin importar cuántas veces el backtracking recrea el generador.
+    """
+    cutout_root, manifest_path, _ = build_mixed_cutout_library(
+        tmp_path, STRESS_SIZES, name="bt_cutouts"
+    )
+    specs = build_scene_specs(tmp_path, [("basic", 3)], manifest_path)
+
+    scale_lo, scale_hi = DIFFICULTY_RULES["basic"]["scale"]
+    rot_lo, rot_hi = DIFFICULTY_RULES["basic"]["rotation"]
+    structured_pairs = {
+        (scale, rotation)
+        for scale in (scale_lo, (scale_lo + scale_hi) / 2.0, scale_hi)
+        for rotation in (0.0, rot_hi / 2.0, rot_lo / 2.0, rot_hi, rot_lo)
+    }
+    calls = {"random": 0, "structured": 0}
+    events = {"attempts": 0, "undos": 0}
+
+    original_transform = scenes_module.transform_cutout
+    original_compose = scenes_module._compose_attempt
+    original_undo = scenes_module._undo_last_commit
+
+    def counting_transform(rgba, scale, rotation_deg):
+        kind = "structured" if (scale, rotation_deg) in structured_pairs else "random"
+        calls[kind] += 1
+        return original_transform(rgba, scale, rotation_deg)
+
+    def counting_compose(scene_spec, cutouts, rng):
+        events["attempts"] += 1
+        return original_compose(scene_spec, cutouts, rng)
+
+    def counting_undo(existing):
+        events["undos"] += 1
+        return original_undo(existing)
+
+    monkeypatch.setattr(scenes_module, "transform_cutout", counting_transform)
+    monkeypatch.setattr(scenes_module, "_compose_attempt", counting_compose)
+    monkeypatch.setattr(scenes_module, "_undo_last_commit", counting_undo)
+
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+
+    assert len(rows) == 3  # la escena se resolvió, sin reducir objetos
+    assert events["undos"] >= 1  # el backtracking ocurrió de verdad
+    attempts = events["attempts"]
+    # Fase aleatoria materializada UNA vez por objeto e intento (64 c/u):
+    # cualquier re-transformación al recrear el generador inflaría el conteo.
+    assert calls["random"] == 64 * 3 * attempts
+    # La fase estructurada precomputa exactamente 15 geometrías por objeto
+    # (3 escalas x 5 rotaciones) por intento, y nada más.
+    assert calls["structured"] == 15 * 3 * attempts
+
+
+def test_structured_backtracking_solves_large_basic_scene(tmp_path):
+    """Fallback estructurado resuelve Basic n=3 con cutouts grandes.
+
+    Cutouts sintéticos heterogéneos (900x900, 760x620, 640x520 — el mayor
+    replica el estrés del piloto real): el muestreo aleatorio por sí solo no
+    encuentra una disposición con oclusión <= 0.05 para el objeto grande
+    (regresión del fallo original de SYN_0114/SYN_0115), pero el fallback
+    estructurado con backtracking coloca EXACTAMENTE los 3 objetos planificados
+    dentro del límite, sin reducir el conteo. Se exige además que al menos un
+    objeto haya quedado colocado por un candidato estructurado (scale/rotation
+    exactos de la grilla determinista), demostrando que el fallback participó
+    en la solución.
+    """
+    cutout_root, manifest_path, _ = build_mixed_cutout_library(
+        tmp_path, STRESS_SIZES, name="large_basic"
+    )
+    specs = build_scene_specs(tmp_path, [("basic", 3)], manifest_path)
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+
+    assert len(rows) == 3
+    assert {int(row["actual_object_count"]) for row in rows} == {3}
+    assert sorted(int(row["z_order"]) for row in rows) == [0, 1, 2]
+    assert sorted(int(row["placement_index"]) for row in rows) == [0, 1, 2]
+    for row in rows:
+        assert float(row["occlusion_fraction"]) <= 0.05
+        assert int(row["visible_area"]) > 0
+    placed_pairs = {(row["scale"], row["rotation_deg"]) for row in rows}
+    assert placed_pairs & _structured_signatures("basic"), (
+        "ningún objeto fue colocado por la grilla estructurada"
+    )
+
+
+def test_structured_backtracking_solves_dense_medium_and_hard(tmp_path):
+    """Escenas densas Medium n=5 y Hard n=8 se generan completas.
+
+    Con cutouts sintéticos grandes para su dificultad, el solver coloca los
+    conteos EXACTOS (5 y 8), cada objeto dentro de su límite de oclusión
+    contractual (0.15 / 0.30) y con área visible positiva. La reducción de
+    objetos está prohibida por contrato: generate_scenes habría lanzado
+    SceneGenerationError en lugar de devolver filas.
+    """
+    cases = (
+        ("medium", 5, (760, 620), 0.15),
+        ("hard", 8, (480, 400), 0.30),
+    )
+    for difficulty, n_products, size, max_occlusion in cases:
+        name = f"dense_{difficulty}"
+        cutout_root, manifest_path, _ = build_cutout_library(
+            tmp_path, n_products, size=size, name=name
+        )
+        specs = build_scene_specs(
+            tmp_path, [(difficulty, n_products)], manifest_path, plan_name=f"{name}_plan.csv"
+        )
+        rows, _ = run_generate_scenes(
+            specs, cutout_root, str(tmp_path / f"{name}_out"), manifest_path
+        )
+
+        assert len(rows) == n_products
+        assert {int(row["planned_object_count"]) for row in rows} == {n_products}
+        assert {int(row["actual_object_count"]) for row in rows} == {n_products}
+        assert sorted(int(row["placement_index"]) for row in rows) == list(range(n_products))
+        for row in rows:
+            assert float(row["occlusion_fraction"]) <= max_occlusion
+            assert int(row["visible_area"]) > 0
+
+
+def test_structured_fallback_is_byte_deterministic(tmp_path):
+    """El camino estructurado es determinista byte a byte.
+
+    Mismo input y mismo seed (el plan asigna seeds fijos 42000+index) corrido
+    dos veces en directorios distintos: las imágenes PNG, los labels YOLO y
+    todas las columnas geométricas del manifiesto (incluidos los hashes de
+    salida) deben ser idénticas. Cutouts heterogéneos grandes para forzar que
+    la solución pase por el fallback estructurado (mismo fixture estresante
+    que el test de Basic n=3).
+    """
+    geometry_columns = (
+        "placement_index", "scale", "rotation_deg", "x", "y", "z_order",
+        "transformed_area", "visible_area", "occlusion_fraction",
+        "xmin", "ymin", "xmax", "ymax",
+        "yolo_xc", "yolo_yc", "yolo_w", "yolo_h",
+        "output_image_sha256", "output_label_sha256",
+    )
+    results = []
+    for run in ("run_a", "run_b"):
+        base = tmp_path / run
+        cutout_root, manifest_path, _ = build_mixed_cutout_library(
+            base, STRESS_SIZES, name="det_cutouts"
+        )
+        specs = build_scene_specs(base, [("basic", 3)], manifest_path)
+        rows, _ = run_generate_scenes(
+            specs, cutout_root, str(base / "out"), manifest_path
+        )
+        results.append((str(base / "out"), rows))
+
+    (out_a, rows_a), (out_b, rows_b) = results
+    assert len(rows_a) == len(rows_b) == 3
+    placed_pairs = {(row["scale"], row["rotation_deg"]) for row in rows_a}
+    assert placed_pairs & _structured_signatures("basic")
+
+    for row_a, row_b in zip(rows_a, rows_b):
+        for column in geometry_columns:
+            assert row_a[column] == row_b[column]
+        image_a = open(os.path.join(out_a, row_a["output_image_relative_path"]), "rb").read()
+        image_b = open(os.path.join(out_b, row_b["output_image_relative_path"]), "rb").read()
+        assert image_a == image_b
+        assert hashlib.sha256(image_a).hexdigest() == row_a["output_image_sha256"]
+        label_a = open(os.path.join(out_a, row_a["output_label_relative_path"]), "rb").read()
+        label_b = open(os.path.join(out_b, row_b["output_label_relative_path"]), "rb").read()
+        assert label_a == label_b
+        assert hashlib.sha256(label_a).hexdigest() == row_a["output_label_sha256"]
