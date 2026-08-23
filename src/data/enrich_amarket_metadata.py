@@ -1,26 +1,32 @@
 """Enriquecedor reproducible de metadata AMARKET — Phase 2 (P2-003/P2-004).
 
-Reprocesa los 655 SKU canónicos consultando su ficha pública
-(``/products/{sku}``) y el endpoint Shopify (``/products/{sku}.js``),
-sin volver a descargar imágenes. Implementación conforme a
-docs/governance/03_PHASE2/05_METADATA_ENRICHMENT_CONTRACT_v1_0_0.md.
+Une el manifest canónico de 655 activos (`data/manifests/source_assets_full.csv`,
+que trae `product_name`/`description`/`product_page_url`/`image_url`/`sha256`
+de la corrida SCR-001 --full-crawl) con `data/manifests/splits.csv` (que trae
+`split`) por `source_asset_id`, y reprocesa cada `product_page_url` (+ su
+variante Shopify `.js`) para agregar `brand`, `technical_product`, `size`,
+`units`, `materials`, `presentation`, `category` y los campos `metadata_*`,
+sin volver a descargar imágenes. Esquema de salida exacto según
+docs/governance/03_PHASE2/11_ENRICHED_MANIFEST_SCHEMA.csv.
 
-Regla dura: ``shopify_tags``/``product_type`` NUNCA se copian a
-``category_direct``. La categoría solo se registra si aparece en un
-campo etiquetado explícitamente en la página del producto.
+Reglas duras:
+- `product_name`, `description`, `product_page_url`, `image_url`, `sha256`
+  se preservan literalmente del manifest canónico — NUNCA se reconstruyen,
+  infieren ni reemplazan por lo observado en vivo durante el reprocesamiento.
+- `category` solo se llena si la página declara un campo etiquetado
+  explícito; el vendor/tags/product_type de Shopify NUNCA se copian ahí.
 """
 
 import argparse
 import json
 import re
-import time
 import unicodedata
 
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -29,61 +35,53 @@ from src.scraper_extraction import (
     ProductParser,
     atomic_write_csv,
     atomic_write_json,
+    check_robots,
     read_csv_rows,
 )
 
 
-METADATA_PARSER_VERSION = "1.0.0"
+METADATA_PARSER_VERSION = "2.0.0"
 
-BASE_URL = "https://amarket.com.bo"
-
-PRESERVED_SPLIT_FIELDS = [
-    "sku_id",
-    "source_asset_id",
-    "duplicate_group_id",
-    "class_id",
-    "split",
-    "image_path",
-    "label_path",
-    "source_sha256",
-    "box_algorithm_version",
-    "parameters_hash",
+# Columnas preservadas literalmente del manifest canónico
+# (data/manifests/source_assets_full.csv), nunca reconstruidas.
+CANONICAL_PROVENANCE_FIELDS = [
+    "product_name",
+    "description",
+    "product_page_url",
+    "image_url",
+    "sha256",
 ]
 
-ENRICHMENT_FIELDS = [
-    "product_url",
-    "html_status",
-    "html_http_status",
-    "js_status",
-    "js_http_status",
-    "page_title",
-    "vendor",
-    "shopify_tags",
-    "product_type",
-    "brand_direct",
+# Esquema exacto de docs/governance/03_PHASE2/11_ENRICHED_MANIFEST_SCHEMA.csv
+ENRICHED_MANIFEST_FIELDS = [
+    "source_asset_id",
+    "sku_id",
+    "product_name",
+    "description",
+    "brand",
     "technical_product",
     "size",
     "units",
     "materials",
     "presentation",
-    "category_direct",
-    "category_status",
-    "description_detail",
+    "category",
+    "product_page_url",
+    "image_url",
+    "sha256",
+    "split",
+    "metadata_retrieved_at",
+    "metadata_http_status",
+    "metadata_parser_version",
     "metadata_status",
     "metadata_error",
-    "metadata_retrieved_at",
-    "metadata_parser_version",
 ]
 
-ENRICHED_MANIFEST_FIELDS = PRESERVED_SPLIT_FIELDS + ENRICHMENT_FIELDS
-
 # Etiquetas directas observadas en la ficha de producto (span
-# "product-stock-level__availability") mapeadas a columnas del
-# contrato. La clave está normalizada: minúsculas, sin acentos, sin
-# los dos puntos finales.
+# "product-stock-level__availability") mapeadas a columnas del contrato.
+# La clave está normalizada: minúsculas, sin acentos, sin ":" final.
 DIRECT_LABEL_MAP = {
-    "categoria": "category_direct",
-    "marca": "brand_direct",
+    "categoria": "category",
+    "marca": "brand",
     "producto": "technical_product",
     "tamano": "size",
     "unidades": "units",
@@ -97,8 +95,6 @@ DIRECT_LABEL_PATTERN = re.compile(
     r'<span class="product-stock-level__availability">\s*'
     r"([^<]+?)\s*</span>([^<]*)"
 )
-
-DESCRIPTION_TRUNCATE_LENGTH = 600
 
 
 def _normalize_label(raw_label):
@@ -115,8 +111,9 @@ def _normalize_label(raw_label):
 def extract_direct_labels(html_text):
     """Extrae pares etiqueta/valor observados directamente en la ficha.
 
-    Nunca infiere: solo captura lo que el HTML declara explícitamente
-    bajo una etiqueta reconocida. Etiquetas no reconocidas se ignoran.
+    Nunca infiere: solo captura lo que el HTML declara explícitamente bajo
+    una etiqueta reconocida. `category` solo se llena aquí, nunca desde
+    shopify_tags/product_type/vendor.
     """
 
     found = {}
@@ -135,22 +132,19 @@ def extract_direct_labels(html_text):
     return found
 
 
-def build_product_urls(sku_id):
-    """Construye las URLs HTML y Shopify JSON contractuales para un SKU."""
+def js_url_for(product_page_url):
+    """Deriva la URL Shopify .js a partir de la product_page_url canónica.
 
-    slug = quote(str(sku_id).strip(), safe="")
+    Válido para cualquier prefijo de colección: Shopify sirve el mismo
+    recurso .js sin importar si la ruta viene prefijada por /collections/X/.
+    Verificado en vivo antes de implementar (mismo tamaño de respuesta que
+    /products/{sku}.js).
+    """
 
-    return (
-        f"{BASE_URL}/products/{slug}",
-        f"{BASE_URL}/products/{slug}.js",
+    parsed = urlsplit(product_page_url)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path + ".js", "", "")
     )
-
-
-def _truncate_description(text, limit=DESCRIPTION_TRUNCATE_LENGTH):
-    if len(text) <= limit:
-        return text
-
-    return text[:limit].rstrip() + "…"
 
 
 def _strip_html(fragment):
@@ -158,230 +152,228 @@ def _strip_html(fragment):
     return " ".join(unescape(without_tags).split())
 
 
-def fetch_html_metadata(client, html_url):
-    """Consulta la ficha HTML y extrae los campos observables.
-
-    Devuelve un dict con status/http_status/error y los campos
-    extraídos (vacíos si la página no los declara).
-    """
+def fetch_html_fields(client, product_page_url):
+    """Consulta la ficha HTML y extrae los campos directos observables."""
 
     result = {
-        "html_status": "",
         "html_http_status": "",
-        "page_title": "",
-        "description_meta": "",
         "direct_labels": {},
         "error": "",
     }
 
     try:
-        response = client.get(html_url)
+        response = client.get(product_page_url)
 
     except HTTPError as error:
         result["html_http_status"] = str(error.code)
-        result["html_status"] = (
-            "NOT_FOUND" if error.code == 404 else "HTTP_ERROR"
-        )
         result["error"] = f"HTML HTTP {error.code}"
         return result
 
     except URLError as error:
-        result["html_status"] = "NETWORK_ERROR"
         result["error"] = f"HTML network error: {error.reason}"
         return result
 
     result["html_http_status"] = str(response["status"])
 
     if response["status"] != 200:
-        result["html_status"] = "HTTP_ERROR"
         result["error"] = f"HTML HTTP {response['status']}"
         return result
 
     try:
         html_text = response["body"].decode("utf-8", errors="replace")
-
-        parser = ProductParser()
-        parser.feed(html_text)
-
-        page_title = (
-            parser.meta.get("og:title") or parser.title or ""
-        ).strip()
-
-        description_meta = (
-            parser.meta.get("og:description")
-            or parser.meta.get("description")
-            or ""
-        ).strip()
-
-        result["page_title"] = page_title
-        result["description_meta"] = description_meta
         result["direct_labels"] = extract_direct_labels(html_text)
-        result["html_status"] = "OK"
 
     except Exception as error:  # noqa: BLE001 - registrado, no silencioso
-        result["html_status"] = "PARSE_ERROR"
         result["error"] = f"HTML parse error: {error}"
 
     return result
 
 
-def fetch_js_metadata(client, js_url):
-    """Consulta el endpoint Shopify .js y extrae vendor/tags/type/description."""
+def fetch_js_fields(client, js_url):
+    """Consulta el endpoint Shopify .js para vendor (candidato a brand).
 
-    result = {
-        "js_status": "",
-        "js_http_status": "",
-        "vendor": "",
-        "shopify_tags": "",
-        "product_type": "",
-        "description_js": "",
-        "error": "",
-    }
+    vendor/tags/product_type NUNCA pueblan `category` — solo se usa
+    `vendor` como candidato de `brand` cuando la ficha no trae una
+    etiqueta "Marca:" explícita.
+    """
+
+    result = {"vendor": "", "error": ""}
 
     try:
         response = client.get(js_url)
 
     except HTTPError as error:
-        result["js_http_status"] = str(error.code)
-        result["js_status"] = (
-            "NOT_FOUND" if error.code == 404 else "HTTP_ERROR"
-        )
         result["error"] = f"JS HTTP {error.code}"
         return result
 
     except URLError as error:
-        result["js_status"] = "NETWORK_ERROR"
         result["error"] = f"JS network error: {error.reason}"
         return result
 
-    result["js_http_status"] = str(response["status"])
-
     if response["status"] != 200:
-        result["js_status"] = "HTTP_ERROR"
         result["error"] = f"JS HTTP {response['status']}"
         return result
 
     try:
         payload = json.loads(response["body"].decode("utf-8", errors="replace"))
-
-        tags = payload.get("tags") or []
-
-        if isinstance(tags, str):
-            tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
-
         result["vendor"] = (payload.get("vendor") or "").strip()
-        result["shopify_tags"] = "; ".join(tags)
-        result["product_type"] = (payload.get("type") or "").strip()
-        result["description_js"] = _strip_html(payload.get("description", ""))
-        result["js_status"] = "OK"
 
     except (ValueError, TypeError, AttributeError) as error:
-        result["js_status"] = "PARSE_ERROR"
         result["error"] = f"JS parse error: {error}"
 
     return result
 
 
-def enrich_row(client, row):
-    """Enriquece una fila de splits.csv sin alterar su identidad original.
+def enrich_row(client, joined_row):
+    """Enriquece una fila ya unida (canónica + split) sin tocar provenance.
 
-    shopify_tags/product_type jamás se copian a category_direct: la
-    categoría solo se llena si la ficha HTML la declara explícitamente
-    bajo una etiqueta reconocida (ver DIRECT_LABEL_MAP).
+    `product_name`/`description`/`product_page_url`/`image_url`/`sha256`
+    se copian tal cual de `joined_row` (vienen del manifest canónico) —
+    esta función solo agrega brand/technical_product/size/units/materials/
+    presentation/category/metadata_*.
     """
 
-    sku_id = row["sku_id"]
-    html_url, js_url = build_product_urls(sku_id)
+    product_page_url = joined_row["product_page_url"]
+    js_url = js_url_for(product_page_url)
 
-    html_result = fetch_html_metadata(client, html_url)
-    js_result = fetch_js_metadata(client, js_url)
+    html_result = fetch_html_fields(client, product_page_url)
+    js_result = fetch_js_fields(client, js_url)
 
     direct_labels = html_result["direct_labels"]
 
-    description_detail = html_result["description_meta"]
+    brand = direct_labels.get("brand") or js_result["vendor"]
 
-    if not description_detail and js_result["description_js"]:
-        description_detail = _truncate_description(js_result["description_js"])
-
-    if html_result["html_status"] == "OK":
-        if direct_labels.get("category_direct"):
-            category_status = "FOUND"
-        else:
-            category_status = "NOT_FOUND"
-    else:
-        category_status = "UNKNOWN"
-
-    metadata_status = "OK" if html_result["html_status"] == "OK" else "FAILED"
+    metadata_status = "OK" if not html_result["error"] else "FAILED"
 
     errors = [message for message in (html_result["error"], js_result["error"]) if message]
     metadata_error = "; ".join(errors)
 
-    enriched = {field: row.get(field, "") for field in PRESERVED_SPLIT_FIELDS}
+    enriched = {field: joined_row[field] for field in ENRICHED_MANIFEST_FIELDS if field in joined_row}
 
     enriched.update(
         {
-            "product_url": html_url,
-            "html_status": html_result["html_status"],
-            "html_http_status": html_result["html_http_status"],
-            "js_status": js_result["js_status"],
-            "js_http_status": js_result["js_http_status"],
-            "page_title": html_result["page_title"],
-            "vendor": js_result["vendor"],
-            "shopify_tags": js_result["shopify_tags"],
-            "product_type": js_result["product_type"],
-            "brand_direct": direct_labels.get("brand_direct", ""),
+            "brand": brand,
             "technical_product": direct_labels.get("technical_product", ""),
             "size": direct_labels.get("size", ""),
             "units": direct_labels.get("units", ""),
             "materials": direct_labels.get("materials", ""),
             "presentation": direct_labels.get("presentation", ""),
-            "category_direct": direct_labels.get("category_direct", ""),
-            "category_status": category_status,
-            "description_detail": description_detail,
+            "category": direct_labels.get("category", ""),
+            "metadata_retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "metadata_http_status": html_result["html_http_status"],
+            "metadata_parser_version": METADATA_PARSER_VERSION,
             "metadata_status": metadata_status,
             "metadata_error": metadata_error,
-            "metadata_retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "metadata_parser_version": METADATA_PARSER_VERSION,
         }
     )
 
-    return enriched
+    return {field: enriched.get(field, "") for field in ENRICHED_MANIFEST_FIELDS}
 
 
-def load_input_rows(splits_path):
-    """Carga y valida el manifest fuente de 655 SKU canónicos."""
+def load_canonical_source(path):
+    """Carga el manifest canónico de 655 activos (source_assets_full.csv)."""
 
-    rows = read_csv_rows(splits_path)
+    rows = read_csv_rows(path)
 
     if not rows:
-        raise ValueError(f"No se pudieron leer filas de {splits_path}")
+        raise ValueError(f"No se pudieron leer filas del manifest canónico: {path}")
 
-    seen_asset_ids = set()
+    by_id = {}
 
     for row in rows:
-        for field in ("sku_id", "source_asset_id", "split", "source_sha256", "image_path", "label_path"):
-            if not row.get(field):
-                raise ValueError(
-                    f"Fila con '{field}' vacío en {splits_path}: {row}"
-                )
+        asset_id = row.get("source_asset_id")
 
-        asset_id = row["source_asset_id"]
+        if not asset_id:
+            raise ValueError(f"Fila sin source_asset_id en el manifest canónico: {row}")
 
-        if asset_id in seen_asset_ids:
+        if asset_id in by_id:
             raise ValueError(
-                f"source_asset_id duplicado en el manifest fuente: {asset_id}"
+                f"source_asset_id duplicado en el manifest canónico: {asset_id}"
             )
 
-        seen_asset_ids.add(asset_id)
+        for field in CANONICAL_PROVENANCE_FIELDS:
+            if not row.get(field):
+                raise ValueError(
+                    f"Fila con '{field}' vacío en el manifest canónico "
+                    f"(source_asset_id={asset_id})"
+                )
 
-    return rows
+        by_id[asset_id] = row
+
+    return by_id
+
+
+def join_canonical_with_splits(canonical_by_id, split_rows):
+    """Une el manifest canónico con splits.csv por source_asset_id.
+
+    Exige correspondencia EXACTA 655/655: cada fila de splits.csv debe
+    tener un match único en el manifest canónico, y viceversa (ninguna
+    fila del manifest canónico queda sin usar). sku_id y sha256 se
+    cruzan-validan entre ambas fuentes; cualquier discrepancia detiene
+    la ejecución en vez de elegir un valor silenciosamente.
+    """
+
+    split_ids = {row["source_asset_id"] for row in split_rows}
+    canonical_ids = set(canonical_by_id.keys())
+
+    missing_in_canonical = split_ids - canonical_ids
+    unused_in_canonical = canonical_ids - split_ids
+
+    if missing_in_canonical:
+        raise ValueError(
+            "P2-002 join incompleto: "
+            f"{len(missing_in_canonical)} source_asset_id de splits.csv "
+            f"no están en el manifest canónico: {sorted(missing_in_canonical)[:5]}..."
+        )
+
+    if unused_in_canonical:
+        raise ValueError(
+            "P2-002 join incompleto: "
+            f"{len(unused_in_canonical)} source_asset_id del manifest canónico "
+            f"no están en splits.csv: {sorted(unused_in_canonical)[:5]}..."
+        )
+
+    joined_rows = []
+
+    for split_row in split_rows:
+        asset_id = split_row["source_asset_id"]
+        canonical_row = canonical_by_id[asset_id]
+
+        if canonical_row["sku_id"] != split_row["sku_id"]:
+            raise ValueError(
+                f"sku_id no coincide entre manifest canónico y splits.csv "
+                f"para source_asset_id={asset_id}: "
+                f"{canonical_row['sku_id']!r} != {split_row['sku_id']!r}"
+            )
+
+        if canonical_row["sha256"] != split_row["source_sha256"]:
+            raise ValueError(
+                f"sha256 no coincide entre manifest canónico y splits.csv "
+                f"para source_asset_id={asset_id}: "
+                f"{canonical_row['sha256']!r} != {split_row['source_sha256']!r}"
+            )
+
+        joined_rows.append(
+            {
+                "source_asset_id": asset_id,
+                "sku_id": split_row["sku_id"],
+                "product_name": canonical_row["product_name"],
+                "description": canonical_row["description"],
+                "product_page_url": canonical_row["product_page_url"],
+                "image_url": canonical_row["image_url"],
+                "sha256": canonical_row["sha256"],
+                "split": split_row["split"],
+            }
+        )
+
+    return joined_rows
 
 
 def summarize(enriched_rows, source_row_count):
     """Construye el resumen de conteos realmente observados."""
 
-    def count_ok(field):
-        return sum(1 for row in enriched_rows if row[field] == "OK")
+    def count_ok_status():
+        return sum(1 for row in enriched_rows if row["metadata_status"] == "OK")
 
     def count_nonempty(field):
         return sum(1 for row in enriched_rows if row[field])
@@ -390,10 +382,8 @@ def summarize(enriched_rows, source_row_count):
         {
             "sku_id": row["sku_id"],
             "source_asset_id": row["source_asset_id"],
-            "html_status": row["html_status"],
-            "html_http_status": row["html_http_status"],
-            "js_status": row["js_status"],
-            "js_http_status": row["js_http_status"],
+            "metadata_http_status": row["metadata_http_status"],
+            "metadata_status": row["metadata_status"],
             "metadata_error": row["metadata_error"],
         }
         for row in enriched_rows
@@ -403,11 +393,10 @@ def summarize(enriched_rows, source_row_count):
     return {
         "source_rows": source_row_count,
         "processed": len(enriched_rows),
-        "html_ok": count_ok("html_status"),
-        "js_ok": count_ok("js_status"),
-        "vendor_found": count_nonempty("vendor"),
-        "tags_found": count_nonempty("shopify_tags"),
-        "direct_category_found": count_nonempty("category_direct"),
+        "html_ok": count_ok_status(),
+        "brand_found": count_nonempty("brand"),
+        "category_found": count_nonempty("category"),
+        "presentation_found": count_nonempty("presentation"),
         "failures": failures,
         "failure_count": len(failures),
         "metadata_parser_version": METADATA_PARSER_VERSION,
@@ -416,28 +405,49 @@ def summarize(enriched_rows, source_row_count):
 
 
 def run(config, limit):
-    """Ejecuta el enriquecimiento sobre el manifest fuente."""
+    """Ejecuta el join + enriquecimiento sobre el manifest fuente."""
 
+    canonical_path = Path(config["input"]["canonical_source_manifest"])
     splits_path = Path(config["input"]["splits_manifest"])
 
-    rows = load_input_rows(splits_path)
+    canonical_by_id = load_canonical_source(canonical_path)
+    split_rows = read_csv_rows(splits_path)
 
-    selected_rows = rows[:limit] if limit is not None else rows
+    if not split_rows:
+        raise ValueError(f"No se pudieron leer filas de {splits_path}")
+
+    joined_rows = join_canonical_with_splits(canonical_by_id, split_rows)
+
+    selected_rows = joined_rows[:limit] if limit is not None else joined_rows
 
     client = PoliteHttpClient({"http": config["http"]})
 
+    robots_parsers = {}
     enriched_rows = []
 
-    for index, row in enumerate(selected_rows, start=1):
-        print(f"[{index}/{len(selected_rows)}] SKU={row['sku_id']}")
+    for index, joined_row in enumerate(selected_rows, start=1):
+        print(f"[{index}/{len(selected_rows)}] SKU={joined_row['sku_id']}")
 
-        enriched = enrich_row(client, row)
+        parsed = urlsplit(joined_row["product_page_url"])
+        robots_base = f"{parsed.scheme}://{parsed.netloc}"
+
+        if robots_base not in robots_parsers:
+            robots_parsers[robots_base] = check_robots(client, robots_base, robots_base)
+
+        robots_parser = robots_parsers[robots_base]
+
+        if not robots_parser.can_fetch(client.user_agent, joined_row["product_page_url"]):
+            raise PermissionError(
+                f"robots.txt no permite acceder a: {joined_row['product_page_url']}"
+            )
+
+        enriched = enrich_row(client, joined_row)
         enriched_rows.append(enriched)
 
         print(
-            f"    html={enriched['html_status']}"
-            f" js={enriched['js_status']}"
-            f" category={enriched['category_status']}"
+            f"    metadata_status={enriched['metadata_status']}"
+            f" brand={'SET' if enriched['brand'] else '-'}"
+            f" category={'SET' if enriched['category'] else '-'}"
         )
 
     output_path = Path(config["outputs"]["enriched_manifest"])
@@ -445,7 +455,7 @@ def run(config, limit):
 
     atomic_write_csv(output_path, enriched_rows, ENRICHED_MANIFEST_FIELDS)
 
-    summary = summarize(enriched_rows, len(rows))
+    summary = summarize(enriched_rows, len(joined_rows))
 
     atomic_write_json(summary_path, summary)
 
@@ -468,6 +478,10 @@ def load_config(config_path):
         if section not in config:
             raise ValueError(f"Falta la sección obligatoria '{section}' en la configuración.")
 
+    for key in ("canonical_source_manifest", "splits_manifest"):
+        if key not in config["input"]:
+            raise ValueError(f"Falta 'input.{key}' en la configuración.")
+
     return config
 
 
@@ -475,7 +489,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Enriquecimiento reproducible de metadata AMARKET (P2-003/P2-004): "
-            "reprocesa las fichas de producto sin descargar imágenes."
+            "une el manifest canónico con splits.csv y reprocesa cada ficha "
+            "de producto sin descargar imágenes."
         )
     )
 
@@ -483,6 +498,12 @@ def parse_args():
         "--config",
         default="configs/metadata_enrichment.yaml",
         help="Ruta al archivo YAML de configuración.",
+    )
+
+    parser.add_argument(
+        "--canonical-source",
+        default=None,
+        help="Sobrescribe input.canonical_source_manifest del YAML.",
     )
 
     mode_group = parser.add_mutually_exclusive_group()
@@ -496,7 +517,7 @@ def parse_args():
     mode_group.add_argument(
         "--full-run",
         action="store_true",
-        help="Procesa las 655 filas del manifest fuente completo.",
+        help="Procesa las 655 filas del join canónico completo.",
     )
 
     parser.add_argument(
@@ -517,8 +538,12 @@ def main():
 
     config = load_config(args.config)
 
+    if args.canonical_source is not None:
+        config["input"]["canonical_source_manifest"] = args.canonical_source
+
     print("Configuración válida.")
-    print("Manifest fuente:", config["input"]["splits_manifest"])
+    print("Manifest canónico:", config["input"]["canonical_source_manifest"])
+    print("Manifest de splits:", config["input"]["splits_manifest"])
     print("Manifest enriquecido:", config["outputs"]["enriched_manifest"])
 
     if args.full_run:

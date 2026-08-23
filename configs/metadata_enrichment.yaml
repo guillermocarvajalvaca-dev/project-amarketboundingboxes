@@ -1,4 +1,5 @@
 input:
+  canonical_source_manifest: data/manifests/source_assets_full.csv
   splits_manifest: data/manifests/splits.csv
 
 http:

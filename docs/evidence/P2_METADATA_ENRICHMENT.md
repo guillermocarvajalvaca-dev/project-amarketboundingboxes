@@ -313,19 +313,174 @@ procedencia real no resuelve el bloqueo de fondo, y el coordinador
 indicó explícitamente detenerse aquí en vez de autorizar sustitutos
 en vivo o reconstrucción.
 
+## P2-002 = RESOLVED — handoff canónico recibido y verificado independientemente
+
+El coordinador entregó el manifest canónico faltante:
+`C:\Users\LENOVO\AppData\Local\Temp\P2_METADATA_SOURCE_86eaa30f39264d6a92041fe195de2686\source_assets_full.csv`.
+
+No se aceptó por confianza — se verificó de forma independiente antes de
+usarlo:
+
+- **Hash**: `sha256(source_assets_full.csv)` calculado localmente =
+  `01ce89ee9239c5a9ba70ca0bf46f05c1c1a926f81e4110cab6ffff2e1b3b9c38`,
+  coincide exactamente con el declarado en el `HANDOFF_METADATA.txt` que
+  acompaña el handoff.
+- **Consistencia de esquema**: las columnas de `source_assets_full.csv`
+  coinciden exactamente con `MANIFEST_FIELDS` de
+  `src/scraper_extraction.py` (mismo orden), y su fila de ejemplo para
+  SKU `7773401007956` trae `sha256=07ab51fe...`, idéntico al
+  `source_sha256`/`duplicate_group_id` ya presentes en
+  `data/manifests/splits.csv` para ese mismo SKU — confirmación
+  criptográfica cruzada de que es el manifest original del que
+  `splits.csv` fue derivado, no un archivo reconstruido.
+- **Búsqueda de origen alternativo dentro del repo**: antes de aceptar
+  el handoff se buscó si el manifest ya existía versionado en el repo
+  (no) — ver sección STOP-THE-LINE anterior.
+- Copiado a `data/manifests/source_assets_full.csv` (ruta ya designada
+  por `configs/data_sources_full.yaml` para el output de
+  `--full-crawl`), con hash verificado idéntico tras la copia. Este
+  archivo es un manifest (~518 KB, sin imágenes), consistente con la
+  restricción de "no agregar imágenes ni artefactos pesados".
+
+### Join canónico ↔ splits.csv — resultados literales (post-merge de origin/main)
+
+```
+JOIN_MATCHED    = 655
+JOIN_MISSING    = 0
+JOIN_EXTRA      = 0
+SKU_MISMATCHES  = 0
+HASH_MISMATCHES = 0
+SPLITS          = train=459, val=98, test=98
+```
+
+Validado programáticamente contra el árbol de trabajo después de
+mergear `origin/main` (`a138929741ec8386b0f5382b16252da5e950dd0c`, PR
+#41, que solo agregó archivos del compositor sintético — merge limpio,
+sin conflictos, ver commit `1f9124e`).
+
+## Reescritura del esquema de salida — conforme a 11_ENRICHED_MANIFEST_SCHEMA.csv
+
+`src/data/enrich_amarket_metadata.py`, `configs/metadata_enrichment.yaml`
+y `tests/test_enrich_amarket_metadata.py` fueron reescritos:
+
+- **Input**: `join_canonical_with_splits()` une
+  `data/manifests/source_assets_full.csv` (provee `product_name`,
+  `description`, `product_page_url`, `image_url`, `sha256`) con
+  `data/manifests/splits.csv` (provee `split`) por `source_asset_id`,
+  exigiendo correspondencia exacta 655/655 en ambas direcciones y
+  cruzando `sku_id` y `sha256`/`source_sha256` — cualquier discrepancia
+  detiene la ejecución (`ValueError`) en vez de elegir un valor.
+- **Provenance nunca reconstruida**: `product_name`, `description`,
+  `product_page_url`, `image_url`, `sha256` se copian literalmente del
+  manifest canónico al resultado final, incluso si el fetch en vivo de
+  la página observa un `og:title`/`og:image` distinto (verificado por
+  `test_canonical_provenance_is_never_overwritten_by_live_fetch`).
+- **Columnas de salida**: exactamente las de
+  `11_ENRICHED_MANIFEST_SCHEMA.csv` — `source_asset_id`, `sku_id`,
+  `product_name`, `description`, `brand`, `technical_product`, `size`,
+  `units`, `materials`, `presentation`, `category`, `product_page_url`,
+  `image_url`, `sha256`, `split`, `metadata_retrieved_at`,
+  `metadata_http_status`, `metadata_parser_version`, `metadata_status`,
+  `metadata_error`. Ya NO existen `brand_direct`, `category_direct`,
+  `html_http_status`/`js_http_status` ni un `product_url` reconstruido
+  desde `sku_id` — verificado por
+  `test_output_fields_match_governing_schema_exactly` y
+  `test_run_writes_exact_governing_header`.
+- **`brand`**: etiqueta directa "Marca:" en la ficha si existe; si no,
+  `vendor` del JSON Shopify (campo directamente devuelto por la
+  plataforma, no inferido por el código). `category` sigue **sin**
+  aceptar `vendor`/`shopify_tags`/`product_type` como sustituto bajo
+  ninguna circunstancia (`test_shopify_tags_never_become_category_and_vendor_becomes_brand`).
+- **`.js` endpoint**: derivado de `product_page_url` agregando `.js`
+  (`js_url_for`), preservando el prefijo real de colección
+  (`/collections/lo-nuevo/products/{sku}.js`) en vez de asumir
+  `/products/{sku}.js` — verificado en vivo antes de implementar
+  (misma respuesta, 2803 bytes, que el endpoint sin prefijo).
+- **robots.txt**: se consulta y se respeta por host antes de la
+  primera fila (`check_robots`, reutilizado de `src/scraper_extraction.py`),
+  y cada `product_page_url` se valida contra el parser resultante antes
+  de pedirla.
+
+### Tests — 19/19 focalizados, bajo `.venv` 3.11.9 / pytest 9.1.1 (post-merge)
+
+```
+.\.venv\Scripts\python.exe -m pytest tests/test_enrich_amarket_metadata.py -v
+```
+
+19 passed, exit code 0. Cubren: esquema exacto de columnas, join
+655/655 (y sus 3 formas de fallo: faltante, sobrante, mismatch de
+sku_id/sha256), preservación literal de provenance incluso ante fetch
+en vivo distinto, derivación de `.js` con prefijo de colección, `brand`
+desde etiqueta directa vs. `vendor`, `category` nunca desde tags, 404,
+preservación de identidad end-to-end, ninguna URL de imagen solicitada,
+conteo de filas de salida == filas fuente sin duplicados.
+
+Suite completa del repositorio, mismo entorno: **219 passed, 1 failed**,
+exit code 1. El único fallo
+(`test_scraper_extraction.py::TestScraperExtraction::test_s02_incomplete_config_fails`)
+es el mismo problema preexistente de encoding de `subprocess` en
+Windows ya documentado arriba (pertenece a PR #31, no tocado por esta
+rama). El incremento de 106→219 tests pasando corresponde a los ~113
+tests nuevos traídos por el merge de `origin/main` (PR #41, compositor
+sintético P2-006/P2-007), no a este cambio.
+
+## Corrida completa de los 655 SKU — BLOQUEADA por rate-limit del sitio (Cloudflare 429)
+
+Tras pasar el merge, el join 655/655 y los 19/19 tests focalizados, se
+lanzó la corrida canónica real. **No completó**: interrumpida por
+instrucción explícita del coordinador en la primera versión (antes del
+merge, por disciplina de procedencia — sin datos perdidos), y la
+segunda versión (ya post-merge, la única que cuenta como corrida
+canónica) llegó a 438/655 filas antes de ser detenida, con 231/437
+filas (>50%) en `metadata_status=FAILED`, concentradas desde
+aproximadamente la fila 400 en adelante.
+
+Diagnóstico (una sola petición de verificación, no una nueva corrida
+completa):
+
+```
+HTTPError 429 Too Many Requests
+Server: cloudflare
+Cf-Mitigated: challenge
+Body: página de reto "Verifying your connection..." de Cloudflare
+```
+
+Causa más probable: volumen acumulado de peticiones de las varias
+corridas completas iniciadas hoy (varias interrumpidas a mitad de
+camino por las sucesivas correcciones STOP-THE-LINE), no un problema
+del código de reprocesamiento en sí — el mismo código, con delay
+cortés de 1.0 s y reintentos acotados, había completado 655/655 sin
+este problema en una corrida anterior del día (ver sección superior,
+esquema no conforme pero HTTP 200 en 652/655).
+
+**No se intentó eludir el reto de Cloudflare** — sería evasión de
+detección, fuera de lo que este agente hace bajo cualquier
+circunstancia. **No se relanzó la corrida de inmediato.** Decisión del
+coordinador: esperar y reintentar más adelante, sin fijar un tiempo de
+espera unilateralmente.
+
 ## Estado
 
-P2_002 = BLOCKED (manifest canónico de 655 activos con
-`product_page_url`/`image_url`/`product_name`/`description` no localizado
-en este entorno)
+P2_002 = RESOLVED (manifest canónico verificado independientemente por
+hash + consistencia criptográfica cruzada con `splits.csv`; join
+655/655 exacto, 0 discrepancias de sku_id/sha256, splits
+train=459/val=98/test=98)
 
-P2_METADATA = BLOCKED (esquema de salida no conforme a
-`11_ENRICHED_MANIFEST_SCHEMA.csv` mientras P2-002 siga bloqueado; el
-commit `6542a8f` NO debe considerarse `READY_FOR_REVIEW` bajo el esquema
-contractual)
+Esquema de salida (`src/data/enrich_amarket_metadata.py` +
+`tests/test_enrich_amarket_metadata.py`) = CONFORME a
+`11_ENRICHED_MANIFEST_SCHEMA.csv`, verificado por 19/19 tests
+focalizados bajo `.venv` 3.11.9 / pytest 9.1.1 post-merge.
+
+P2_METADATA = **NOT_READY — bloqueada por rate-limit del sitio
+(HTTP 429 / Cloudflare), no por el esquema ni por el join.** La corrida
+real de los 655 SKU con el esquema corregido queda pendiente de
+reintento cuando el coordinador lo autorice.
+`data/manifests/source_assets_enriched.csv` committeado en este PR
+**sigue siendo la versión anterior de 655 filas con el esquema NO
+conforme** (`brand_direct`/`category_direct`/...) — se deja así
+deliberadamente en vez de sobrescribirla con una corrida parcial
+(3 filas de smoke test o 438 filas con >50% de fallos por rate-limit),
+para no reemplazar un artefacto completo por uno incompleto.
 
 No autoaprobado. No mergeado. `docs/governance/03_PHASE2/*` no fue
-modificado. Sin cambios de código adicionales en esta corrección; en
-espera de que el coordinador resuelva la dependencia de P2-002 (aportar
-el manifest canónico o autorizar explícitamente una estrategia
-alternativa) antes de continuar.
+modificado en ningún commit de esta rama.
