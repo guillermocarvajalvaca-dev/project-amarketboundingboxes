@@ -19,7 +19,11 @@ from src.data.enrich_amarket_metadata import (
     js_url_for,
     join_canonical_with_splits,
     load_canonical_source,
+    load_legacy_enrichment,
+    normalize_legacy_offline,
+    normalize_legacy_row,
     run,
+    run_offline_normalize,
 )
 from src.scraper_extraction import PoliteHttpClient, atomic_write_csv, read_csv_rows
 
@@ -543,6 +547,207 @@ def test_run_output_row_count_equals_source_and_no_duplicates():
         source_asset_ids = [row["source_asset_id"] for row in output_rows]
         assert len(source_asset_ids) == len(set(source_asset_ids))
 
+        assert list(output_rows[0].keys()) == GOVERNING_SCHEMA_COLUMNS
+
+
+# --- Normalización offline (sin red) de una salida heredada ---
+
+
+def _legacy_row(
+    source_asset_id="asset-1",
+    sku_id="1234567890123",
+    brand_direct="",
+    vendor="VENDOR JSON",
+    category_direct="",
+    html_http_status="200",
+    metadata_status="OK",
+    metadata_error="",
+    presentation="Unidad",
+    metadata_parser_version="1.0.0",
+):
+    return {
+        "sku_id": sku_id,
+        "source_asset_id": source_asset_id,
+        "duplicate_group_id": "a" * 64,
+        "class_id": "0",
+        "split": "train",
+        "image_path": f"images/train/{source_asset_id}.jpg",
+        "label_path": f"labels/train/{source_asset_id}.txt",
+        "source_sha256": "a" * 64,
+        "box_algorithm_version": "pixel-extremes-v1",
+        "parameters_hash": "b" * 64,
+        "product_url": f"https://amarket.com.bo/products/{sku_id}",
+        "html_status": "OK" if html_http_status == "200" else "NOT_FOUND",
+        "html_http_status": html_http_status,
+        "js_status": "OK",
+        "js_http_status": "200",
+        "page_title": f"Producto {sku_id}",
+        "vendor": vendor,
+        "shopify_tags": "Lo Nuevo",
+        "product_type": "",
+        "brand_direct": brand_direct,
+        "technical_product": "",
+        "size": "",
+        "units": "",
+        "materials": "",
+        "presentation": presentation,
+        "category_direct": category_direct,
+        "category_status": "FOUND" if category_direct else "NOT_FOUND",
+        "description_detail": f"Descripcion legacy {sku_id}",
+        "metadata_status": metadata_status,
+        "metadata_error": metadata_error,
+        "metadata_retrieved_at": "2026-08-22T22:00:00+00:00",
+        "metadata_parser_version": metadata_parser_version,
+    }
+
+
+def test_normalize_legacy_row_brand_prefers_brand_direct_over_vendor():
+    joined = _joined_row(sku_id="1", source_asset_id="asset-1")
+    legacy = _legacy_row(source_asset_id="asset-1", brand_direct="MARCA DIRECTA", vendor="VENDOR JSON")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert normalized["brand"] == "MARCA DIRECTA"
+
+
+def test_normalize_legacy_row_brand_falls_back_to_vendor():
+    joined = _joined_row(sku_id="2", source_asset_id="asset-2")
+    legacy = _legacy_row(source_asset_id="asset-2", brand_direct="", vendor="VENDOR JSON")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert normalized["brand"] == "VENDOR JSON"
+
+
+def test_normalize_legacy_row_category_never_uses_vendor_or_tags():
+    joined = _joined_row(sku_id="3", source_asset_id="asset-3")
+    legacy = _legacy_row(source_asset_id="asset-3", category_direct="", vendor="ACME")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert normalized["category"] == ""
+
+
+def test_normalize_legacy_row_maps_http_status_and_preserves_parser_version():
+    joined = _joined_row(sku_id="4", source_asset_id="asset-4")
+    legacy = _legacy_row(source_asset_id="asset-4", html_http_status="404", metadata_status="FAILED")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert normalized["metadata_http_status"] == "404"
+    assert normalized["metadata_status"] == "FAILED"
+    assert normalized["metadata_parser_version"] == "1.0.0"
+
+
+def test_normalize_legacy_row_preserves_canonical_provenance_not_legacy():
+    """product_name/description/product_page_url/image_url/sha256 deben
+    venir de `joined` (canónico), nunca de nada del CSV legacy."""
+
+    joined = _joined_row(sku_id="5", source_asset_id="asset-5")
+    legacy = _legacy_row(source_asset_id="asset-5")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert normalized["product_name"] == joined["product_name"]
+    assert normalized["description"] == joined["description"]
+    assert normalized["product_page_url"] == joined["product_page_url"]
+    assert normalized["image_url"] == joined["image_url"]
+    assert normalized["sha256"] == joined["sha256"]
+    assert normalized["split"] == joined["split"]
+
+
+def test_normalize_legacy_row_output_matches_governing_schema():
+    joined = _joined_row(sku_id="6", source_asset_id="asset-6")
+    legacy = _legacy_row(source_asset_id="asset-6")
+
+    normalized = normalize_legacy_row(joined, legacy)
+
+    assert list(normalized.keys()) == GOVERNING_SCHEMA_COLUMNS
+
+
+def test_normalize_legacy_offline_requires_full_legacy_coverage():
+    joined_rows = [_joined_row(sku_id="7", source_asset_id="asset-7"), _joined_row(sku_id="8", source_asset_id="asset-8")]
+    legacy_by_id = {"asset-7": _legacy_row(source_asset_id="asset-7")}
+
+    with pytest.raises(ValueError, match="no tienen"):
+        normalize_legacy_offline(joined_rows, legacy_by_id)
+
+
+def test_load_legacy_enrichment_rejects_duplicate_source_asset_id():
+    rows = [_legacy_row(source_asset_id="dup"), _legacy_row(source_asset_id="dup", sku_id="999")]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "legacy.csv"
+        atomic_write_csv(path, rows, list(rows[0].keys()))
+
+        with pytest.raises(ValueError, match="duplicado"):
+            load_legacy_enrichment(path)
+
+
+def test_run_offline_normalize_end_to_end_no_network(monkeypatch):
+    """La normalización offline no debe tocar la red en absoluto."""
+
+    canonical_rows = [
+        _canonical_row(sku_id="1000000000001", source_asset_id="asset-a", sha256="a" * 64),
+        _canonical_row(sku_id="1000000000002", source_asset_id="asset-b", sha256="b" * 64),
+    ]
+    split_rows = [
+        _split_row(sku_id="1000000000001", source_asset_id="asset-a", sha256="a" * 64, split="train"),
+        _split_row(sku_id="1000000000002", source_asset_id="asset-b", sha256="b" * 64, split="val"),
+    ]
+    legacy_rows = [
+        _legacy_row(source_asset_id="asset-a", sku_id="1000000000001", brand_direct="MARCA A"),
+        _legacy_row(
+            source_asset_id="asset-b",
+            sku_id="1000000000002",
+            html_http_status="404",
+            metadata_status="FAILED",
+            metadata_error="HTML HTTP 404; JS HTTP 404",
+            presentation="",
+        ),
+    ]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+
+        canonical_path = root / "source_assets_full.csv"
+        splits_path = root / "splits.csv"
+        legacy_path = root / "legacy.csv"
+        output_path = root / "enriched.csv"
+        summary_path = root / "summary.json"
+
+        atomic_write_csv(canonical_path, canonical_rows, list(canonical_rows[0].keys()))
+        atomic_write_csv(splits_path, split_rows, list(split_rows[0].keys()))
+        atomic_write_csv(legacy_path, legacy_rows, list(legacy_rows[0].keys()))
+
+        config = {
+            "input": {
+                "canonical_source_manifest": str(canonical_path),
+                "splits_manifest": str(splits_path),
+            },
+            "outputs": {"enriched_manifest": str(output_path), "summary": str(summary_path)},
+        }
+
+        def _fail_if_network_touched(*args, **kwargs):
+            raise AssertionError("La normalización offline no debe acceder a la red.")
+
+        with patch("src.scraper_extraction.request_with_retries", side_effect=_fail_if_network_touched):
+            summary = run_offline_normalize(config, str(legacy_path))
+
+        output_rows = read_csv_rows(output_path)
+
+        assert len(output_rows) == 2
+        assert summary["processed"] == 2
+        assert summary["html_ok"] == 1
+        assert summary["failure_count"] == 1
+        assert summary["failed_skus"] == ["1000000000002"]
+
+        by_id = {row["source_asset_id"]: row for row in output_rows}
+        assert by_id["asset-a"]["brand"] == "MARCA A"
+        assert by_id["asset-a"]["product_name"] == canonical_rows[0]["product_name"]
+        assert by_id["asset-a"]["split"] == "train"
+        assert by_id["asset-b"]["split"] == "val"
+        assert by_id["asset-b"]["metadata_http_status"] == "404"
         assert list(output_rows[0].keys()) == GOVERNING_SCHEMA_COLUMNS
 
 

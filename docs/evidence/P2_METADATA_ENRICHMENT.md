@@ -471,16 +471,183 @@ Esquema de salida (`src/data/enrich_amarket_metadata.py` +
 `11_ENRICHED_MANIFEST_SCHEMA.csv`, verificado por 19/19 tests
 focalizados bajo `.venv` 3.11.9 / pytest 9.1.1 post-merge.
 
-P2_METADATA = **NOT_READY — bloqueada por rate-limit del sitio
-(HTTP 429 / Cloudflare), no por el esquema ni por el join.** La corrida
-real de los 655 SKU con el esquema corregido queda pendiente de
-reintento cuando el coordinador lo autorice.
-`data/manifests/source_assets_enriched.csv` committeado en este PR
-**sigue siendo la versión anterior de 655 filas con el esquema NO
-conforme** (`brand_direct`/`category_direct`/...) — se deja así
-deliberadamente en vez de sobrescribirla con una corrida parcial
-(3 filas de smoke test o 438 filas con >50% de fallos por rate-limit),
-para no reemplazar un artefacto completo por uno incompleto.
+P2_METADATA (estado en este punto, superado por la sección siguiente) =
+NOT_READY — bloqueada por rate-limit del sitio (HTTP 429 / Cloudflare),
+no por el esquema ni por el join.
+`LIVE_POST_MERGE_RUN=BLOCKED_AT_438_BY_HTTP_429` — este registro
+histórico se conserva íntegro; la sección siguiente NO lo reemplaza,
+lo complementa con una vía offline.
+
+No autoaprobado. No mergeado. `docs/governance/03_PHASE2/*` no fue
+modificado en ningún commit de esta rama.
+
+## Normalización OFFLINE, DETERMINISTA y TRAZABLE (sin red) — instrucción final del coordinador
+
+Instrucción explícita: cancelar cualquier reintento a AMARKET, no hacer
+ninguna petición nueva al sitio, no intentar eludir Cloudflare. Producir
+el CSV final del esquema gobernante reetiquetando observaciones de red
+**ya reales**, tomadas de la corrida completa 655/655 previa a la
+corrección de esquema (commit `d455aef`, presente sin cambios hasta
+`afdfed1`), en vez de volver a contactar el sitio.
+
+`NETWORK_OBSERVATIONS_SOURCE = PRIOR_SUCCESSFUL_655_ROW_RUN`
+`SCHEMA_NORMALIZATION = OFFLINE_DETERMINISTIC`
+`CLOUDFLARE_BYPASS = NO`
+`DATA_INVENTED = NO`
+
+### Fuentes usadas
+
+1. **CSV legacy** (esquema no conforme, pero con 655/655 observaciones de
+   red reales): materializado con
+   `git show afdfed13d6f32e89762b51b95c7182e9673458e3:data/manifests/source_assets_enriched.csv`
+   a una ruta temporal **fuera del repositorio** (no se sobrescribió
+   nada del repo hasta validar).
+2. `data/manifests/source_assets_full.csv` (manifest canónico, ya
+   verificado por hash en la sección P2-002 anterior).
+3. `data/manifests/splits.csv` (split por `source_asset_id`).
+
+### Gates previos a transformar cualquier dato (calculados, no supuestos)
+
+```
+LEGACY_ROWS      = 655
+CANONICAL_ROWS   = 655
+SPLITS_ROWS      = 655
+UNIQUE_SOURCE_IDS = 655 (idénticos en las tres fuentes: legacy_ids == canonical_ids == splits_ids)
+JOIN_MATCHED     = 655
+JOIN_MISSING     = 0
+JOIN_EXTRA       = 0
+SKU_MISMATCHES   = 0
+HASH_MISMATCHES  = 0
+SPLITS           = train=459, val=98, test=98
+```
+
+Todos los gates pasaron; no fue necesario un Stop-the-Line en este
+paso.
+
+### Implementación (código, no edición manual del CSV)
+
+`src/data/enrich_amarket_metadata.py` gana:
+
+- `load_legacy_enrichment(path)`: carga el CSV legacy, exige columnas
+  requeridas y ausencia de `source_asset_id` duplicado.
+- `normalize_legacy_row(joined_row, legacy_row)`: mapeo exacto —
+  - `source_asset_id`/`sku_id`/`product_name`/`description`/
+    `product_page_url`/`image_url`/`sha256`/`split` ← `joined_row`
+    (join canónico + splits, NUNCA del CSV legacy);
+  - `brand` ← `legacy.brand_direct` si no está vacío, si no
+    `legacy.vendor`;
+  - `category` ← `legacy.category_direct` (nunca `vendor`/`shopify_tags`/
+    `product_type`);
+  - `technical_product`/`size`/`units`/`materials`/`presentation`/
+    `metadata_retrieved_at`/`metadata_status`/`metadata_error` ←
+    mismo campo del legacy, sin transformar;
+  - `metadata_http_status` ← `legacy.html_http_status`;
+  - `metadata_parser_version` ← `legacy.metadata_parser_version`
+    (preserva literalmente el valor histórico `1.0.0`, no la constante
+    actual del módulo).
+  - `product_url`, `page_title`, `description_detail` del legacy
+    **nunca** se usan como sustitutos de columnas canónicas.
+- `normalize_legacy_offline(joined_rows, legacy_by_id)`: aplica el
+  mapeo a las 655 filas, deteniéndose si a alguna fila del join le
+  falta contraparte legacy (nunca inventa la fila).
+- `run_offline_normalize(config, legacy_source_path)`: orquesta join +
+  normalización + escritura atómica del CSV final y su resumen JSON.
+  Cero llamadas de red — reutiliza únicamente `read_csv_rows`/
+  `atomic_write_csv`/`atomic_write_json` de `src/scraper_extraction.py`.
+- CLI: `--offline-normalize --legacy-source <ruta>` (mutuamente
+  exclusivo con `--smoke-test`/`--full-run`).
+
+### Tests focalizados — 28/28, `.venv` 3.11.9 / pytest 9.1.1
+
+```
+.\.venv\Scripts\python.exe -m pytest tests/test_enrich_amarket_metadata.py -v
+```
+
+28 passed, exit code 0 (19 anteriores del join/schema en vivo + 9
+nuevos de la normalización offline: mapeo `brand`/`category`,
+preservación de provenance canónica, cobertura completa legacy
+obligatoria, esquema de salida exacto, y un test que hace fallar la
+red si `run_offline_normalize` la tocara).
+
+### Ejecución real (sin red) sobre los 655 activos
+
+```
+.\.venv\Scripts\python.exe -m src.data.enrich_amarket_metadata --offline-normalize --legacy-source <ruta temporal del CSV legacy>
+```
+
+Resumen — **calculado, no hardcodeado**, y coincide exactamente con lo
+esperado:
+
+```
+OUTPUT_ROWS        = 655
+UNIQUE_SOURCE_IDS   = 655
+METADATA_OK         = 652
+METADATA_FAILED     = 3
+HTTP_200            = 652
+HTTP_404            = 3
+BRAND_FOUND         = 652
+CATEGORY_FOUND      = 0
+PRESENTATION_FOUND  = 650
+FAILED_SKUS         = 309971879203, 309974700139, 7899620665101
+                      (exactamente el conjunto esperado — sin SKU
+                      adicionales ni faltantes)
+```
+
+Validación adicional sobre el CSV final:
+- Encabezado == exactamente las 20 columnas de
+  `11_ENRICHED_MANIFEST_SCHEMA.csv`.
+- `product_name`/`description`/`product_page_url`/`image_url`/`sha256`
+  de las 655 filas coinciden byte a byte con
+  `data/manifests/source_assets_full.csv` (0 discrepancias) — provenance
+  nunca reconstruida, siempre del manifest canónico.
+- `data/manifests/source_assets_enriched.csv` (repo) reemplazado por
+  este resultado — 655 filas, esquema conforme, `metadata_parser_version=1.0.0`
+  reflejando honestamente que la observación de red original se hizo
+  bajo esa versión del parser, no bajo la actual.
+
+### Suite completa, mismo entorno
+
+```
+.\.venv\Scripts\python.exe -m pytest tests/ -q
+```
+
+**228 passed, 1 failed**, exit code 1 — no se declara PASS con código
+de salida distinto de 0. El único fallo sigue siendo
+`test_scraper_extraction.py::TestScraperExtraction::test_s02_incomplete_config_fails`,
+preexistente y no relacionado (encoding de `subprocess` en Windows,
+PR #31). El incremento 219→228 corresponde a los 9 tests nuevos de
+normalización offline de esta sección.
+
+### `git diff --check`
+
+Exit code 0 — sin errores de espacio en blanco en el diff.
+
+### `FROZEN_FILES_CHANGED`
+
+`git diff -- docs/governance/` contra `origin/main` → sin salida.
+**FROZEN_FILES_CHANGED = 0** en todos los commits de esta rama.
+
+## Estado final
+
+```
+P2_002 = RESOLVED
+SCHEMA_NORMALIZATION = OFFLINE_DETERMINISTIC
+NETWORK_OBSERVATIONS_SOURCE = PRIOR_SUCCESSFUL_655_ROW_RUN
+LIVE_POST_MERGE_RUN = BLOCKED_AT_438_BY_HTTP_429 (registro histórico conservado, no reintentado)
+CLOUDFLARE_BYPASS = NO
+DATA_INVENTED = NO
+P2_METADATA = READY_FOR_CONDITIONAL_INDEPENDENT_REVIEW
+```
+
+"Condicional" porque el reprocesamiento de red real bajo el esquema
+corregido no llegó a completarse en vivo (bloqueado por rate-limit);
+los valores de `brand`/`technical_product`/`size`/`units`/`materials`/
+`presentation`/`category`/`metadata_*` provienen de una corrida real
+completa pero hecha bajo el esquema anterior, reetiquetados aquí sin
+recalcular ni volver a observar nada. Identidad, provenance
+(`product_name`/`description`/`product_page_url`/`image_url`/`sha256`)
+y split están verificados contra el manifest canónico independiente,
+no contra el CSV legacy.
 
 No autoaprobado. No mergeado. `docs/governance/03_PHASE2/*` no fue
 modificado en ningún commit de esta rama.

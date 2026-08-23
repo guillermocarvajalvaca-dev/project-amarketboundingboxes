@@ -369,6 +369,147 @@ def join_canonical_with_splits(canonical_by_id, split_rows):
     return joined_rows
 
 
+# Mapa exacto legacy -> esquema gobernante para la normalización offline
+# (P2-004 sin red: reetiqueta observaciones ya reales de una corrida completa
+# anterior, nunca inventa valores nuevos).
+LEGACY_FIELD_MAP = {
+    "technical_product": "technical_product",
+    "size": "size",
+    "units": "units",
+    "materials": "materials",
+    "presentation": "presentation",
+    "metadata_retrieved_at": "metadata_retrieved_at",
+    "metadata_status": "metadata_status",
+    "metadata_error": "metadata_error",
+}
+
+REQUIRED_LEGACY_FIELDS = [
+    "source_asset_id",
+    "brand_direct",
+    "vendor",
+    "category_direct",
+    "html_http_status",
+    "metadata_parser_version",
+] + list(LEGACY_FIELD_MAP)
+
+
+def load_legacy_enrichment(path):
+    """Carga la salida enriquecida heredada (esquema no conforme, pre-fix).
+
+    Se usa como única fuente de las observaciones de red YA REALIZADAS
+    (una corrida completa real de los 655 SKU, previa a esta corrección
+    de esquema) para la normalización offline — nunca se vuelve a
+    contactar el sitio.
+    """
+
+    rows = read_csv_rows(path)
+
+    if not rows:
+        raise ValueError(f"No se pudieron leer filas del CSV legacy: {path}")
+
+    by_id = {}
+
+    for row in rows:
+        asset_id = row.get("source_asset_id")
+
+        if not asset_id:
+            raise ValueError(f"Fila legacy sin source_asset_id: {row}")
+
+        if asset_id in by_id:
+            raise ValueError(f"source_asset_id duplicado en el CSV legacy: {asset_id}")
+
+        missing = [field for field in REQUIRED_LEGACY_FIELDS if field not in row]
+
+        if missing:
+            raise ValueError(
+                f"Faltan columnas legacy requeridas para la normalización: {missing}"
+            )
+
+        by_id[asset_id] = row
+
+    return by_id
+
+
+def normalize_legacy_row(joined_row, legacy_row):
+    """Remapea una fila legacy (esquema viejo) al esquema gobernante.
+
+    `joined_row` aporta identidad/provenance ya validada (canónico + split).
+    `legacy_row` aporta las observaciones de red ya realizadas, solo
+    renombradas/reetiquetadas — nunca se inventa ni se recalcula nada.
+    """
+
+    normalized = dict(joined_row)
+
+    normalized["brand"] = legacy_row["brand_direct"] or legacy_row["vendor"]
+    normalized["category"] = legacy_row["category_direct"]
+    normalized["metadata_http_status"] = legacy_row["html_http_status"]
+    normalized["metadata_parser_version"] = legacy_row["metadata_parser_version"]
+
+    for legacy_field, target_field in LEGACY_FIELD_MAP.items():
+        normalized[target_field] = legacy_row[legacy_field]
+
+    return {field: normalized.get(field, "") for field in ENRICHED_MANIFEST_FIELDS}
+
+
+def normalize_legacy_offline(joined_rows, legacy_by_id):
+    """Normaliza todas las filas unidas usando observaciones legacy ya reales.
+
+    Exige que cada fila unida (canónico + split) tenga una contraparte
+    legacy por `source_asset_id` — si falta alguna, se detiene en vez de
+    inventar la fila.
+    """
+
+    missing = [row["source_asset_id"] for row in joined_rows if row["source_asset_id"] not in legacy_by_id]
+
+    if missing:
+        raise ValueError(
+            f"{len(missing)} source_asset_id del join canónico no tienen "
+            f"contraparte en el CSV legacy: {missing[:5]}..."
+        )
+
+    return [normalize_legacy_row(row, legacy_by_id[row["source_asset_id"]]) for row in joined_rows]
+
+
+def run_offline_normalize(config, legacy_source_path):
+    """Ejecuta la normalización offline (sin red) P2-004.
+
+    Une el manifest canónico con splits.csv (misma validación estricta
+    655/655 que la corrida en vivo) y remapea la salida heredada al
+    esquema gobernante, sin contactar amarket.com.bo.
+    """
+
+    canonical_path = Path(config["input"]["canonical_source_manifest"])
+    splits_path = Path(config["input"]["splits_manifest"])
+
+    canonical_by_id = load_canonical_source(canonical_path)
+    split_rows = read_csv_rows(splits_path)
+
+    if not split_rows:
+        raise ValueError(f"No se pudieron leer filas de {splits_path}")
+
+    joined_rows = join_canonical_with_splits(canonical_by_id, split_rows)
+
+    legacy_by_id = load_legacy_enrichment(legacy_source_path)
+
+    enriched_rows = normalize_legacy_offline(joined_rows, legacy_by_id)
+
+    output_path = Path(config["outputs"]["enriched_manifest"])
+    summary_path = Path(config["outputs"]["summary"])
+
+    atomic_write_csv(output_path, enriched_rows, ENRICHED_MANIFEST_FIELDS)
+
+    summary = summarize(enriched_rows, len(joined_rows))
+    summary["source"] = "OFFLINE_NORMALIZATION"
+    summary["legacy_source_path"] = str(legacy_source_path)
+
+    atomic_write_json(summary_path, summary)
+
+    print("Resumen (normalización offline, sin red):")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    return summary
+
+
 def summarize(enriched_rows, source_row_count):
     """Construye el resumen de conteos realmente observados."""
 
@@ -377,6 +518,9 @@ def summarize(enriched_rows, source_row_count):
 
     def count_nonempty(field):
         return sum(1 for row in enriched_rows if row[field])
+
+    def count_http_status(status):
+        return sum(1 for row in enriched_rows if row["metadata_http_status"] == status)
 
     failures = [
         {
@@ -394,11 +538,14 @@ def summarize(enriched_rows, source_row_count):
         "source_rows": source_row_count,
         "processed": len(enriched_rows),
         "html_ok": count_ok_status(),
+        "http_200": count_http_status("200"),
+        "http_404": count_http_status("404"),
         "brand_found": count_nonempty("brand"),
         "category_found": count_nonempty("category"),
         "presentation_found": count_nonempty("presentation"),
         "failures": failures,
         "failure_count": len(failures),
+        "failed_skus": sorted(row["sku_id"] for row in failures),
         "metadata_parser_version": METADATA_PARSER_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -520,11 +667,27 @@ def parse_args():
         help="Procesa las 655 filas del join canónico completo.",
     )
 
+    mode_group.add_argument(
+        "--offline-normalize",
+        action="store_true",
+        help=(
+            "Normaliza al esquema gobernante SIN red, reetiquetando una "
+            "salida enriquecida heredada (--legacy-source) con el esquema "
+            "no conforme. No contacta amarket.com.bo."
+        ),
+    )
+
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Sobrescribe el número de filas a procesar (requiere --smoke-test).",
+    )
+
+    parser.add_argument(
+        "--legacy-source",
+        default=None,
+        help="Ruta al CSV enriquecido heredado (requiere --offline-normalize).",
     )
 
     return parser.parse_args()
@@ -536,6 +699,12 @@ def main():
     if args.limit is not None and not args.smoke_test:
         raise ValueError("--limit solo es válido junto con --smoke-test.")
 
+    if args.legacy_source is not None and not args.offline_normalize:
+        raise ValueError("--legacy-source solo es válido junto con --offline-normalize.")
+
+    if args.offline_normalize and args.legacy_source is None:
+        raise ValueError("--offline-normalize requiere --legacy-source.")
+
     config = load_config(args.config)
 
     if args.canonical_source is not None:
@@ -545,6 +714,11 @@ def main():
     print("Manifest canónico:", config["input"]["canonical_source_manifest"])
     print("Manifest de splits:", config["input"]["splits_manifest"])
     print("Manifest enriquecido:", config["outputs"]["enriched_manifest"])
+
+    if args.offline_normalize:
+        print("Modo: normalización offline (sin red). Legacy:", args.legacy_source)
+        run_offline_normalize(config, args.legacy_source)
+        return
 
     if args.full_run:
         run(config, limit=None)
