@@ -1,0 +1,16 @@
+input:
+  splits_manifest: data/manifests/splits.csv
+
+http:
+  user_agent: PROJECT_AMARKETBOUNDINGBOXES/1.0 academic-metadata-enrichment
+  delay_seconds: 1.0
+  timeout_seconds: 20
+  max_retries: 3
+  backoff_seconds: 2.0
+
+limits:
+  smoke_products: 5
+
+outputs:
+  enriched_manifest: data/manifests/source_assets_enriched.csv
+  summary: outputs/metadata_enrichment_summary.json
