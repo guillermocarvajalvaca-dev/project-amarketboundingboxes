@@ -24,8 +24,11 @@ Reglas gobernantes:
   (dificultad más permisiva y menos objetos) y los más chicos a las estrictas
   (basic con más objetos). Desempates por source_asset_id y scene_id; las
   cuotas 74x8/385x7 y el resto de las invariantes no cambian. Si el manifiesto
-  no declara foreground_pixels, toda fuente mide 0 y el orden interno cae al
-  desempate lexicográfico (determinista igualmente);
+  no declara la columna foreground_pixels, toda fuente mide 0 y el orden
+  interno cae al desempate lexicográfico (determinista igualmente). Si la
+  columna SÍ está declarada, es obligatoria para toda fila elegible: un valor
+  vacío, no entero o negativo aborta la corrida (nunca defaultea a 0 en
+  silencio, para no enmascarar un manifiesto incompleto);
 - category y metadata_status se propagan literalmente desde el cutout manifest
   (§9 del contrato de generación exige registrar categoría para análisis);
   category puede quedar vacía, pero solo si metadata_status es explícito y no vacío;
@@ -236,6 +239,14 @@ def load_cutout_library(path, governing=True):
             f"cutout manifest '{path}' sin columnas requeridas: {missing}"
         )
 
+    # Se decide una sola vez, por header, si el manifiesto declara la
+    # columna. Si no la declara, es un manifiesto legado: toda fuente mide 0
+    # (compatibilidad, determinista). Si la declara, pasa a ser obligatoria
+    # para toda fila elegible: un valor vacío/ausente en una fila puntual ya
+    # no puede defaultear a 0 en silencio, porque sería indistinguible de un
+    # manifiesto legado completo y ocultaría un manifiesto incompleto.
+    has_foreground_pixels_column = "foreground_pixels" in fieldnames
+
     sources = {}
     skipped_not_accepted = 0
     for lineno, row in enumerate(rows, start=2):
@@ -284,11 +295,17 @@ def load_cutout_library(path, governing=True):
         # (ya verificado no vacío arriba) documenta por qué.
         category = (row["category"] or "").strip()
 
-        # foreground_pixels es opcional pero, si el manifiesto lo declara,
-        # debe ser un entero >= 0: gobierna la distribución por tolerancia
-        # geométrica. Sin la columna, toda fuente mide 0 (determinista).
-        foreground_pixels_text = (row.get("foreground_pixels") or "").strip()
-        if foreground_pixels_text:
+        # Si la columna está en el header, es obligatoria para toda fila
+        # elegible: gobierna la distribución por tolerancia geométrica y un
+        # valor faltante o inválido debe abortar la corrida, no defaultear.
+        if has_foreground_pixels_column:
+            foreground_pixels_text = (row.get("foreground_pixels") or "").strip()
+            if not foreground_pixels_text:
+                raise AssignmentError(
+                    f"cutout manifest línea {lineno}: 'foreground_pixels' vacío para "
+                    f"{source_asset_id} (la columna está declarada en el header: "
+                    f"toda fila elegible debe traer un valor)"
+                )
             try:
                 foreground_pixels = int(foreground_pixels_text)
             except ValueError as exc:

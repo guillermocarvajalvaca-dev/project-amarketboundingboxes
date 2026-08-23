@@ -644,3 +644,72 @@ def test_escenas_estrictas_reciben_menor_carga_geometrica(tmp_path):
     scene_n = [plan_by_scene[sid]["n_products"] for sid in extremes]
     assert averages == sorted(averages, reverse=True)
     assert scene_n == sorted(scene_n)
+
+
+# --------------------------------------------------------------------------
+# foreground_pixels: columna ausente vs. columna presente pero incompleta
+# (auditoría AUDIT_89D796C, punto 12: "ausente => 0" no puede enmascarar en
+# silencio un manifiesto que declara la columna pero la deja incompleta).
+# --------------------------------------------------------------------------
+
+def test_foreground_pixels_columna_ausente_default_global_cero(tmp_path):
+    """Sin la columna en el header, toda fuente mide 0 (manifiesto legado)."""
+    manifest_path = write_cutout_manifest(
+        str(tmp_path / "no_column.csv"), cutout_rows(3)
+    )
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assert all(src["foreground_pixels"] == 0 for src in sources.values())
+
+
+def test_foreground_pixels_columna_presente_valores_validos(tmp_path):
+    """Con la columna presente y todo valor válido, se cargan tal cual."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    manifest_path = write_manifest_with_foreground(str(tmp_path / "valid.csv"), rows)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assert sorted(src["foreground_pixels"] for src in sources.values()) == [
+        100,
+        200,
+        300,
+    ]
+
+
+def test_foreground_pixels_celda_vacia_con_columna_presente_falla(tmp_path):
+    """Columna declarada + una celda vacía: manifiesto incompleto, aborta."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = ""
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "empty_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="foreground_pixels' vacío"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_whitespace_con_columna_presente_falla(tmp_path):
+    """Un valor de solo espacios equivale a vacío: no defaultea, aborta."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "   "
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "whitespace_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="foreground_pixels' vacío"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_no_numerico_falla(tmp_path):
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "abc"
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "nonnumeric_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="no es un entero"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_negativo_falla(tmp_path):
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "-5"
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "negative_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="negativo"):
+        load_cutout_library(manifest_path, governing=False)
