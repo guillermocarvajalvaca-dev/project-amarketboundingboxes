@@ -229,9 +229,103 @@ existentes en `src/scraper_extraction.py`. Solo usa librería estándar +
 versiona (`outputs/*` en `.gitignore`); sus conteos quedan reproducidos
 íntegramente en este documento para evidencia.
 
+## STOP-THE-LINE (2026-08-23) — esquema de salida incompatible con el contrato
+
+Corrección de alcance recibida del coordinador después del commit
+`6542a8f`: el esquema de salida usado hasta ese commit **no** es el
+contractual. `docs/governance/03_PHASE2/11_ENRICHED_MANIFEST_SCHEMA.csv`
+exige literalmente estas columnas:
+
+```
+source_asset_id,sku_id,product_name,description,brand,technical_product,
+size,units,materials,presentation,category,product_page_url,image_url,
+sha256,split,metadata_retrieved_at,metadata_http_status,
+metadata_parser_version,metadata_status,metadata_error
+```
+
+`05_METADATA_ENRICHMENT_CONTRACT_v1_0_0.md` (§Input/§Output) confirma que
+ese esquema asume un **manifest fuente canónico ya existente** que trae
+`product_name`, `description`, `product_page_url`, `image_url` y `sha256`
+como columnas originales a preservar — el enriquecedor solo debe *agregar*
+`brand`, `technical_product`, `size`, `units`, `materials`, `presentation`,
+`category`, `metadata_retrieved_at`, `metadata_http_status`,
+`metadata_parser_version`, `metadata_status`, `metadata_error`.
+
+Las columnas usadas hasta `6542a8f` (`brand_direct`, `category_direct`,
+`html_http_status`, `js_http_status`, `page_title`, `description_detail`,
+`product_url` reconstruido desde `sku_id`) **no son sustitutos válidos**
+de las columnas contractuales — instrucción explícita del coordinador.
+
+### P2-002 = BLOCKED
+
+`data/manifests/splits.csv` (la entrada usada hasta ahora) **no** trae
+`product_page_url`, `image_url`, `product_name` ni `description` — esas
+columnas solo existen en un manifest fuente tipo `source_assets.csv` con
+655 filas, que debe unirse a `splits.csv` por `source_asset_id`. Búsqueda
+realizada antes de continuar:
+
+1. **Historial completo de git, todas las ramas**
+   (`git log --all -- "data/manifests/source_assets*.csv"`): solo 2
+   commits tocaron `data/manifests/source_assets.csv` en toda la historia
+   del repo, ambos de la rama original SCR-001 — sigue siendo la muestra
+   de 3 filas del smoke test, nunca una corrida completa de 655.
+   `data/manifests/source_assets_full.csv` (ruta de salida configurada en
+   `configs/data_sources_full.yaml` para `--full-crawl`) tiene **cero
+   commits** en cualquier rama del repositorio.
+2. **Convención del proyecto**: la rama sin mergear
+   `docs/andres/drive-paths-local` documenta que los artefactos grandes de
+   una corrida completa (imágenes, y por la misma lógica el manifest
+   fuente completo) viven en una carpeta compartida de Google Drive
+   montada localmente por cada integrante, no en git.
+3. **Google Drive local de esta máquina** (`G:\`, Google Drive for
+   Desktop montado): no existe ninguna carpeta llamada
+   `PROJECT_AMARKETBOUNDINGBOXES` ni `AMARKET` en su raíz — es el Drive
+   personal de esta cuenta, sin relación con el proyecto compartido del
+   equipo.
+
+**Conclusión: el manifest canónico de 655 activos no está disponible en
+este entorno de ejecución.** Siguiendo la instrucción explícita del
+coordinador ("no reconstruir ni inventar valores silenciosamente"), se
+reporta el bloqueo en vez de sustituir esas columnas con valores
+reconstruidos o re-obtenidos por scraping en vivo.
+
+### Corrida completa NO repetida
+
+Por el mismo motivo, no se repitió la corrida real de los 655 SKU: el
+punto 6 de la instrucción del coordinador condiciona esa repetición a que
+los tests focalizados pasen sobre el esquema contractual corregido, lo
+cual no es alcanzable mientras P2-002 siga bloqueado. La corrida en
+background que estaba en curso al recibir el STOP-THE-LINE fue
+interrumpida limpiamente (`TaskStop`, equivalente a Ctrl+C) sin borrar
+ningún archivo; `data/manifests/source_assets_enriched.csv` sigue siendo
+la última salida completa válida (655 filas), generada con el esquema
+`brand_direct`/`category_direct`/... anterior a esta corrección, que
+queda documentado aquí como **no conforme al esquema contractual
+11_ENRICHED_MANIFEST_SCHEMA.csv**.
+
+### Sin cambios de código en esta pausa
+
+No se modificó `src/data/enrich_amarket_metadata.py`,
+`tests/test_enrich_amarket_metadata.py` ni `data/manifests/source_assets_enriched.csv`
+en esta corrección de alcance: renombrar columnas sin poder poblar
+`product_name`/`description`/`product_page_url`/`image_url` con
+procedencia real no resuelve el bloqueo de fondo, y el coordinador
+indicó explícitamente detenerse aquí en vez de autorizar sustitutos
+en vivo o reconstrucción.
+
 ## Estado
 
-P2_METADATA = READY_FOR_REVIEW
+P2_002 = BLOCKED (manifest canónico de 655 activos con
+`product_page_url`/`image_url`/`product_name`/`description` no localizado
+en este entorno)
+
+P2_METADATA = BLOCKED (esquema de salida no conforme a
+`11_ENRICHED_MANIFEST_SCHEMA.csv` mientras P2-002 siga bloqueado; el
+commit `6542a8f` NO debe considerarse `READY_FOR_REVIEW` bajo el esquema
+contractual)
 
 No autoaprobado. No mergeado. `docs/governance/03_PHASE2/*` no fue
-modificado.
+modificado. Sin cambios de código adicionales en esta corrección; en
+espera de que el coordinador resuelva la dependencia de P2-002 (aportar
+el manifest canónico o autorizar explícitamente una estrategia
+alternativa) antes de continuar.
