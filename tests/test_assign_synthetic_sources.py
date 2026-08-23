@@ -2,9 +2,10 @@
 Tests P2-006 para src/data/assign_synthetic_sources.py
 
 Cubren las reglas gobernantes de
-docs/governance/03_PHASE2/06_SYNTHETIC_DATA_GENERATION_CONTRACT_v1_0_0.md §1/§3/§4:
+docs/governance/03_PHASE2/06_SYNTHETIC_DATA_GENERATION_CONTRACT_v1_0_0.md §1/§3/§4/§9:
 459 fuentes train, 655 escenas, 3287 placements, reparto 74x8 + 385x7,
-sin repetición dentro de escena y con salida byte a byte reproducible.
+sin repetición dentro de escena, linaje de categoría propagado y con salida
+byte a byte reproducible.
 
 Los fixtures se generan programáticamente: no se usa ninguna imagen ni
 manifiesto real de AMARKET.
@@ -25,6 +26,7 @@ from src.data.assign_synthetic_sources import (
     load_cutout_library,
     load_scene_plan,
     main,
+    validate_relative_path,
     write_assignments,
 )
 
@@ -32,6 +34,8 @@ CUTOUT_COLUMNS = [
     "source_asset_id",
     "sku_id",
     "split",
+    "category",
+    "metadata_status",
     "cutout_relative_path",
     "cutout_sha256",
     "status",
@@ -55,6 +59,8 @@ GOVERNING_DISTRIBUTION = [
     ("extreme", 14, 3),
     ("extreme", 15, 2),
 ]
+
+CATEGORIES = ("beverages", "snacks", "dairy", "cleaning", "personal_care")
 
 
 def fake_source_id(index):
@@ -89,14 +95,23 @@ def write_cutout_manifest(path, rows):
     return path
 
 
-def cutout_rows(count, split="train", status="accepted", start=0):
+def cutout_rows(count, split="train", status="accepted", start=0, category=None):
+    """Filas de cutout manifest con category/metadata_status siempre presentes.
+
+    category=None hace que cada fila reciba una categoría determinista de
+    CATEGORIES (nunca vacía); pasar category="" simula explícitamente el caso
+    de categoría vacía con metadata_status igualmente explícito.
+    """
     rows = []
     for index in range(start, start + count):
         source_id = fake_source_id(index)
+        row_category = CATEGORIES[index % len(CATEGORIES)] if category is None else category
         rows.append({
             "source_asset_id": source_id,
             "sku_id": f"SKU{index:05d}",
             "split": split,
+            "category": row_category,
+            "metadata_status": "ok",
             "cutout_relative_path": f"cutouts/{source_id}.png",
             "cutout_sha256": hashlib.sha256(f"cut-{index}".encode()).hexdigest(),
             "status": status,
@@ -341,3 +356,155 @@ def test_scene_plan_acepta_alias_scene_seed(tmp_path):
     )
     plan = load_scene_plan(path, governing=False)
     assert plan[0]["scene_seed"] == 42001
+
+
+# --------------------------------------------------------------------------
+# Linaje de categoría y metadata_status (auditoría CHANGES_REQUIRED, punto 1)
+# --------------------------------------------------------------------------
+
+def test_manifiesto_sin_columna_category_falla(tmp_path):
+    """category y metadata_status son columnas obligatorias del esquema gobernante."""
+    columns = [c for c in CUTOUT_COLUMNS if c != "category"]
+    path = tmp_path / "no_category.csv"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
+        writer.writeheader()
+        row = cutout_rows(1)[0]
+        del row["category"]
+        writer.writerow(row)
+
+    with pytest.raises(AssignmentError, match="sin columnas requeridas"):
+        load_cutout_library(str(path), governing=False)
+
+
+def test_manifiesto_sin_columna_metadata_status_falla(tmp_path):
+    columns = [c for c in CUTOUT_COLUMNS if c != "metadata_status"]
+    path = tmp_path / "no_metadata_status.csv"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
+        writer.writeheader()
+        row = cutout_rows(1)[0]
+        del row["metadata_status"]
+        writer.writerow(row)
+
+    with pytest.raises(AssignmentError, match="sin columnas requeridas"):
+        load_cutout_library(str(path), governing=False)
+
+
+def test_metadata_status_vacio_falla(tmp_path):
+    """metadata_status vacío no se tolera aunque category tenga un valor."""
+    rows = cutout_rows(1)
+    rows[0]["metadata_status"] = ""
+    path = write_cutout_manifest(str(tmp_path / "empty_status.csv"), rows)
+
+    with pytest.raises(AssignmentError, match="metadata_status"):
+        load_cutout_library(str(path), governing=False)
+
+
+def test_categoria_vacia_permitida_con_metadata_status_explicito(tmp_path):
+    """category vacía es válida SOLO si metadata_status es explícito y no vacío."""
+    rows = cutout_rows(1, category="")
+    rows[0]["metadata_status"] = "missing"
+    path = write_cutout_manifest(str(tmp_path / "empty_category.csv"), rows)
+
+    sources, _ = load_cutout_library(str(path), governing=False)
+    source = next(iter(sources.values()))
+    assert source["category"] == ""
+    assert source["metadata_status"] == "missing"
+
+
+def test_categoria_no_se_inventa_se_preserva_literal(tmp_path):
+    """El valor de category se copia tal cual, sin normalizarlo ni inventarlo."""
+    rows = cutout_rows(1, category="Bebidas / Refrescos")
+    path = write_cutout_manifest(str(tmp_path / "literal_category.csv"), rows)
+
+    sources, _ = load_cutout_library(str(path), governing=False)
+    source = next(iter(sources.values()))
+    assert source["category"] == "Bebidas / Refrescos"
+
+
+def test_categoria_y_metadata_status_se_propagan_a_assignments(tmp_path):
+    """P2-006 propaga category/metadata_status desde el cutout manifest a cada fila."""
+    plan_path = write_scene_plan(str(tmp_path / "plan.csv"), [("basic", 2)])
+    manifest_rows = cutout_rows(4)
+    manifest_rows[0]["category"] = "beverages"
+    manifest_rows[0]["metadata_status"] = "ok"
+    manifest_rows[1]["category"] = ""
+    manifest_rows[1]["metadata_status"] = "missing"
+    manifest_path = write_cutout_manifest(str(tmp_path / "cutouts.csv"), manifest_rows)
+
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+
+    for row in assignments:
+        source = sources[row["source_asset_id"]]
+        assert row["category"] == source["category"]
+        assert row["metadata_status"] == source["metadata_status"]
+        assert row["metadata_status"] != ""
+
+
+def test_write_assignments_incluye_columnas_de_linaje(tmp_path):
+    plan_path = write_scene_plan(str(tmp_path / "plan.csv"), [("basic", 2)])
+    manifest_path = write_cutout_manifest(
+        str(tmp_path / "cutouts.csv"), cutout_rows(4)
+    )
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+
+    out_path = tmp_path / "assignments.csv"
+    write_assignments(assignments, str(out_path))
+
+    with open(out_path, newline="", encoding="utf-8") as handle:
+        header = next(csv.reader(handle))
+    assert "category" in header
+    assert "metadata_status" in header
+
+
+# --------------------------------------------------------------------------
+# Integridad de rutas (auditoría CHANGES_REQUIRED, punto 5)
+# --------------------------------------------------------------------------
+
+def test_validate_relative_path_acepta_ruta_relativa_normal():
+    assert validate_relative_path("cutouts/abc123.png", "cutout_relative_path") == (
+        "cutouts/abc123.png"
+    )
+
+
+def test_validate_relative_path_rechaza_ruta_absoluta_posix():
+    with pytest.raises(AssignmentError, match="absoluta"):
+        validate_relative_path("/etc/passwd", "cutout_relative_path")
+
+
+def test_validate_relative_path_rechaza_ruta_absoluta_windows():
+    with pytest.raises(AssignmentError, match="absoluta"):
+        validate_relative_path("C:\\Windows\\System32\\evil.png", "cutout_relative_path")
+
+
+def test_validate_relative_path_rechaza_traversal():
+    with pytest.raises(AssignmentError, match="traversal"):
+        validate_relative_path("../../etc/passwd", "cutout_relative_path")
+
+
+def test_validate_relative_path_rechaza_traversal_interno():
+    with pytest.raises(AssignmentError, match="traversal"):
+        validate_relative_path("cutouts/../../secret.png", "cutout_relative_path")
+
+
+def test_cutout_relative_path_absoluta_en_manifiesto_falla(tmp_path):
+    rows = cutout_rows(1)
+    rows[0]["cutout_relative_path"] = "/etc/passwd"
+    path = write_cutout_manifest(str(tmp_path / "absolute.csv"), rows)
+
+    with pytest.raises(AssignmentError, match="absoluta"):
+        load_cutout_library(str(path), governing=False)
+
+
+def test_cutout_relative_path_con_traversal_en_manifiesto_falla(tmp_path):
+    rows = cutout_rows(1)
+    rows[0]["cutout_relative_path"] = "../../outside.png"
+    path = write_cutout_manifest(str(tmp_path / "traversal.csv"), rows)
+
+    with pytest.raises(AssignmentError, match="traversal"):
+        load_cutout_library(str(path), governing=False)

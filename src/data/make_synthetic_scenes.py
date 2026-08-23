@@ -15,8 +15,14 @@ Principios:
   sobre el rectángulo del objeto transformado (§7 del contrato de generación);
 - el número de objetos por escena nunca se reduce en silencio: si la escena no
   cumple las restricciones, se regenera; si se agotan los intentos, falla fuerte;
-- ninguna ruta absoluta se escribe en el manifiesto;
-- no hay filtros generativos: solo escalado, rotación y alpha compositing.
+- ninguna ruta absoluta ni con traversal se acepta ni se escribe en el manifiesto;
+- no hay filtros generativos: solo escalado, rotación y alpha compositing;
+- el gate anti-fuga (allowlist train/accepted) y la procedencia del generador
+  (generator_commit) son OBLIGATORIOS: ninguna corrida FULL, PILOT o SELECTED
+  puede completar sin ambos;
+- antes de usar un cutout se verifica su sha256 físico contra el declarado;
+- category y metadata_status se propagan literales desde P2-006, nunca se
+  inventan aquí.
 
 Uso:
     python -m src.data.make_synthetic_scenes \
@@ -24,7 +30,8 @@ Uso:
         --cutout-root <ruta privada>/cutouts \
         --output-root <ruta privada>/synthetic \
         --manifest <ruta privada>/scene_manifest.csv \
-        [--cutout-manifest <ruta>/p2_cutout_library.csv] \
+        --cutout-manifest <ruta>/p2_cutout_library.csv \
+        --generator-commit <sha git> \
         [--pilot | --scene-id SYN_0001 ...] \
         [--background-rgb 255,255,255]
 """
@@ -34,6 +41,7 @@ import hashlib
 import io
 import os
 import random
+import re
 import sys
 
 import numpy as np
@@ -45,6 +53,7 @@ from src.data.assign_synthetic_sources import (
     AssignmentError,
     _read_csv_rows,
     read_assignments,
+    validate_relative_path,
 )
 from src.data.make_boxes import compute_yolo_box
 
@@ -84,6 +93,16 @@ PILOT_QUOTAS = (
 )
 PILOT_SCENE_COUNT = 30
 
+# Campos de linaje que deben ser idénticos para toda aparición de un mismo
+# source_asset_id a lo largo de todo el assignments.csv (06_SYNTHETIC §4/§9).
+LINEAGE_FIELDS = (
+    "sku_id",
+    "category",
+    "metadata_status",
+    "cutout_relative_path",
+    "cutout_sha256",
+)
+
 MANIFEST_COLUMNS = (
     "scene_id",
     "difficulty",
@@ -93,6 +112,8 @@ MANIFEST_COLUMNS = (
     "placement_index",
     "source_asset_id",
     "sku_id",
+    "category",
+    "metadata_status",
     "cutout_sha256",
     "scale",
     "rotation_deg",
@@ -115,7 +136,12 @@ MANIFEST_COLUMNS = (
     "output_image_sha256",
     "output_label_sha256",
     "generator_version",
+    "generator_commit",
 )
+
+# 7-40 hex: acepta SHA corto o completo de git. No se autodetecta nunca desde
+# el cwd; siempre llega explícito por --generator-commit.
+GIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 class SceneGenerationError(RuntimeError):
@@ -128,6 +154,23 @@ class SceneRejected(Exception):
 
 class QAError(AssertionError):
     """Una comprobación de QA automática falló."""
+
+
+def validate_generator_commit(value):
+    """Valida que --generator-commit sea un SHA git bien formado (7-40 hex).
+
+    Nunca se obtiene ejecutando git en el directorio de trabajo actual: debe
+    llegar explícito por CLI para que el manifiesto no quede atado en silencio
+    al commit de un repositorio o worktree distinto del declarado por quien
+    ejecuta la corrida.
+    """
+    text = (value or "").strip()
+    if not GIT_SHA_PATTERN.match(text):
+        raise ValueError(
+            f"--generator-commit no es un SHA git válido (7-40 caracteres hex): "
+            f"{value!r}"
+        )
+    return text.lower()
 
 
 def derive_attempt_seed(scene_seed, attempt):
@@ -154,13 +197,63 @@ def parse_background_rgb(text):
     return values
 
 
+def validate_source_lineage_consistency(rows):
+    """Verifica que cada source_asset_id declare siempre el mismo linaje.
+
+    Si el mismo source_asset_id aparece en más de un placement con sku_id,
+    category, metadata_status, cutout_relative_path o cutout_sha256
+    distintos, es una contradicción de procedencia y aborta la corrida
+    (06_SYNTHETIC §4/§9: la procedencia debe ser exacta y única por fuente).
+    """
+    seen = {}
+    for row in rows:
+        source_id = row["source_asset_id"]
+        fingerprint = tuple(row.get(field, "") for field in LINEAGE_FIELDS)
+        previous = seen.get(source_id)
+        if previous is not None and previous != fingerprint:
+            mismatched = [
+                field
+                for field, before, after in zip(LINEAGE_FIELDS, previous, fingerprint)
+                if before != after
+            ]
+            raise SceneGenerationError(
+                f"source_asset_id '{source_id}' con metadata contradictoria entre "
+                f"placements (campos distintos: {mismatched})"
+            )
+        seen[source_id] = fingerprint
+
+
+def resolve_cutout_path(cutout_root, relative_path):
+    """Resuelve `relative_path` dentro de `cutout_root`, con defensa en profundidad.
+
+    Revalida la ruta (absoluta/traversal) aunque ya haya pasado por P2-006, por
+    si `scene_source_assignments.csv` se editó o construyó a mano; y además
+    confirma que la ruta resuelta no escapa de `cutout_root`.
+    """
+    validated = validate_relative_path(relative_path, "cutout_relative_path")
+    root = os.path.realpath(cutout_root)
+    candidate = os.path.realpath(os.path.join(cutout_root, validated))
+    if os.path.commonpath([root, candidate]) != root:
+        raise AssignmentError(
+            f"cutout_relative_path escapa de cutout_root: {relative_path!r}"
+        )
+    return candidate
+
+
 def group_assignments(rows):
     """Agrupa las filas de asignación por escena preservando el orden del CSV.
 
-    Valida que cada escena tenga placement_index 0..n-1 sin huecos, que el
-    número de placements coincida con planned_n_products y que ninguna fuente
-    se repita dentro de la escena.
+    Valida:
+    - linaje (sku_id/category/metadata_status/ruta/hash) consistente para
+      cada source_asset_id en TODO el archivo, no solo dentro de una escena;
+    - difficulty/scene_seed/planned_n_products consistentes entre todos los
+      placements de una misma escena (nunca se toma "el primero que llegue");
+    - placement_index 0..n-1 sin huecos;
+    - número de placements == planned_n_products;
+    - ningún source_asset_id repetido dentro de la escena.
     """
+    validate_source_lineage_consistency(rows)
+
     scenes = {}
     order = []
     for row in rows:
@@ -174,6 +267,14 @@ def group_assignments(rows):
                 "placements": [],
             }
             order.append(scene_id)
+        else:
+            scene = scenes[scene_id]
+            for field in ("difficulty", "scene_seed", "planned_n_products"):
+                if row[field] != scene[field]:
+                    raise SceneGenerationError(
+                        f"escena {scene_id}: '{field}' inconsistente entre "
+                        f"placements ({scene[field]!r} vs {row[field]!r})"
+                    )
         scenes[scene_id]["placements"].append(row)
 
     specs = []
@@ -454,7 +555,7 @@ def _write_bytes_atomic(path, payload):
         raise
 
 
-def generate_scene(scene_spec, cutouts, output_root, background_rgb):
+def generate_scene(scene_spec, cutouts, output_root, background_rgb, generator_commit):
     """Genera una escena completa: imagen PNG, label YOLO y filas de manifiesto.
 
     Reintenta la escena entera bajo sub-seeds derivados hasta MAX_SCENE_ATTEMPTS.
@@ -527,6 +628,8 @@ def generate_scene(scene_spec, cutouts, output_root, background_rgb):
                 "placement_index": placement["placement_index"],
                 "source_asset_id": placement["source_asset_id"],
                 "sku_id": placement["sku_id"],
+                "category": placement["category"],
+                "metadata_status": placement["metadata_status"],
                 "cutout_sha256": placement["cutout_sha256"],
                 "scale": f"{obj['scale']:.6f}",
                 "rotation_deg": f"{obj['rotation_deg']:.6f}",
@@ -549,6 +652,7 @@ def generate_scene(scene_spec, cutouts, output_root, background_rgb):
                 "output_image_sha256": image_sha256,
                 "output_label_sha256": label_sha256,
                 "generator_version": GENERATOR_VERSION,
+                "generator_commit": generator_commit,
             })
         return rows
 
@@ -562,8 +666,9 @@ def generate_scene(scene_spec, cutouts, output_root, background_rgb):
 def load_train_source_allowlist(cutout_manifest_path):
     """Devuelve el conjunto de source_asset_id train aceptados del inventario.
 
-    Se usa para el gate anti-fuga: cualquier fuente usada en una escena que no
-    esté en esta lista (o que provenga de val/test) hace fallar el QA.
+    Se usa para el gate anti-fuga obligatorio: cualquier fuente usada en una
+    escena que no esté en esta lista (o que provenga de val/test) hace fallar
+    la generación. Ninguna corrida (FULL/PILOT/SELECTED) puede omitir este gate.
     """
     rows, fieldnames = _read_csv_rows(cutout_manifest_path)
     for column in ("source_asset_id", "split", "status"):
@@ -581,8 +686,10 @@ def load_train_source_allowlist(cutout_manifest_path):
     return allowed
 
 
-def validate_outputs(manifest_rows, output_root, expected_scene_ids, allowed_source_ids=None):
+def validate_outputs(manifest_rows, output_root, expected_scene_ids, allowed_source_ids):
     """QA automático sobre las escenas generadas (06_SYNTHETIC §11, 08_QA_GATES P2-G3).
+
+    `allowed_source_ids` es obligatorio: el gate anti-fuga no es opcional.
 
     Falla (QAError) si:
     - el número de imágenes o labels no coincide con las escenas solicitadas;
@@ -591,8 +698,15 @@ def validate_outputs(manifest_rows, output_root, expected_scene_ids, allowed_sou
     - una fuente se repite dentro de una escena;
     - aparece una fuente que no está en la allowlist train (fuga val/test);
     - visible_area <= 0 u oclusión por encima del límite de dificultad;
-    - falta el manifiesto, un hash, o el hash no coincide con el archivo.
+    - falta el manifiesto, un hash, metadata_status o generator_commit, o el
+      hash de imagen/label no coincide con el archivo en disco.
     """
+    if allowed_source_ids is None:
+        raise ValueError(
+            "allowed_source_ids es obligatorio en validate_outputs: el gate "
+            "anti-fuga no puede omitirse"
+        )
+
     expected_scene_ids = list(expected_scene_ids)
     if not manifest_rows:
         raise QAError("manifiesto vacío: no hay evidencia de escenas generadas")
@@ -650,19 +764,20 @@ def validate_outputs(manifest_rows, output_root, expected_scene_ids, allowed_sou
         source_ids = [r["source_asset_id"] for r in rows]
         if len(set(source_ids)) != len(source_ids):
             raise QAError(f"escena {scene_id}: source_asset_id repetido en la escena")
-        if allowed_source_ids is not None:
-            forbidden = sorted(set(source_ids) - set(allowed_source_ids))
-            if forbidden:
-                raise QAError(
-                    f"escena {scene_id}: fuentes fuera del split train "
-                    f"(posible fuga val/test): {forbidden}"
-                )
+        forbidden = sorted(set(source_ids) - set(allowed_source_ids))
+        if forbidden:
+            raise QAError(
+                f"escena {scene_id}: fuentes fuera del split train "
+                f"(posible fuga val/test): {forbidden}"
+            )
 
         for row in rows:
             for column in (
                 "output_image_sha256",
                 "output_label_sha256",
                 "cutout_sha256",
+                "metadata_status",
+                "generator_commit",
             ):
                 if not (row[column] or "").strip():
                     raise QAError(f"escena {scene_id}: '{column}' vacío en manifiesto")
@@ -751,35 +866,59 @@ def generate_scenes(
     scene_specs,
     cutout_root,
     output_root,
+    allowed_source_ids,
+    generator_commit,
     background_rgb=DEFAULT_BACKGROUND_RGB,
-    allowed_source_ids=None,
 ):
-    """Genera todas las escenas indicadas y devuelve (filas_manifiesto, resumen QA)."""
-    if allowed_source_ids is not None:
-        used = {p["source_asset_id"] for s in scene_specs for p in s["placements"]}
-        forbidden = sorted(used - set(allowed_source_ids))
-        if forbidden:
+    """Genera todas las escenas indicadas y devuelve (filas_manifiesto, resumen QA).
+
+    `allowed_source_ids` (gate anti-fuga) y `generator_commit` (procedencia)
+    son obligatorios para toda corrida: FULL, PILOT o SELECTED. Antes de leer
+    cualquier cutout se verifica su sha256 físico contra el declarado.
+    """
+    if allowed_source_ids is None:
+        raise ValueError(
+            "allowed_source_ids es obligatorio (gate anti-fuga train/accepted); "
+            "ninguna corrida puede generarse sin la allowlist"
+        )
+    generator_commit = validate_generator_commit(generator_commit)
+
+    all_placements = [p for spec in scene_specs for p in spec["placements"]]
+    validate_source_lineage_consistency(all_placements)
+
+    used = {p["source_asset_id"] for p in all_placements}
+    forbidden = sorted(used - set(allowed_source_ids))
+    if forbidden:
+        raise SceneGenerationError(
+            f"fuentes fuera del split train aceptado (fuga val/test): {forbidden}"
+        )
+
+    # Los cutouts se cargan una sola vez por source_asset_id, y solo tras
+    # verificar que el PNG físico coincide con el cutout_sha256 declarado.
+    cutouts = {}
+    for placement in all_placements:
+        source_id = placement["source_asset_id"]
+        if source_id in cutouts:
+            continue
+        cutout_path = resolve_cutout_path(cutout_root, placement["cutout_relative_path"])
+        if not os.path.exists(cutout_path):
+            raise SceneGenerationError(f"cutout inexistente: {cutout_path}")
+
+        actual_sha256 = _sha256_file(cutout_path)
+        claimed_sha256 = placement["cutout_sha256"]
+        if actual_sha256 != claimed_sha256:
             raise SceneGenerationError(
-                f"fuentes fuera del split train aceptado (fuga val/test): {forbidden}"
+                f"cutout '{cutout_path}': sha256 físico {actual_sha256} != "
+                f"cutout_sha256 declarado {claimed_sha256} "
+                f"(source_asset_id={source_id})"
             )
 
-    # Los cutouts se cargan una sola vez por source_asset_id.
-    cutouts = {}
-    for spec in scene_specs:
-        for placement in spec["placements"]:
-            source_id = placement["source_asset_id"]
-            if source_id not in cutouts:
-                cutout_path = os.path.join(
-                    cutout_root, placement["cutout_relative_path"]
-                )
-                if not os.path.exists(cutout_path):
-                    raise SceneGenerationError(f"cutout inexistente: {cutout_path}")
-                cutouts[source_id] = load_cutout_rgba(cutout_path)
+        cutouts[source_id] = load_cutout_rgba(cutout_path)
 
     manifest_rows = []
     for spec in scene_specs:
         manifest_rows.extend(
-            generate_scene(spec, cutouts, output_root, background_rgb)
+            generate_scene(spec, cutouts, output_root, background_rgb, generator_commit)
         )
 
     summary = validate_outputs(
@@ -813,9 +952,19 @@ def build_parser():
     parser.add_argument("--manifest", required=True, help="CSV de manifiesto de escenas")
     parser.add_argument(
         "--cutout-manifest",
+        required=True,
         help=(
-            "inventario de cutouts; si se pasa, activa el gate anti-fuga que "
-            "rechaza cualquier fuente que no sea train/accepted"
+            "inventario de cutouts; obligatorio, activa el gate anti-fuga que "
+            "rechaza cualquier fuente que no sea train/accepted. Ninguna corrida "
+            "(FULL/PILOT/SELECTED) puede omitirlo."
+        ),
+    )
+    parser.add_argument(
+        "--generator-commit",
+        required=True,
+        help=(
+            "SHA git (7-40 hex) del commit que produce esta corrida. Debe "
+            "llegar explícito; nunca se autodetecta ejecutando git en el cwd."
         ),
     )
     parser.add_argument(
@@ -846,6 +995,7 @@ def main(argv=None):
 
     try:
         background_rgb = parse_background_rgb(args.background_rgb)
+        generator_commit = validate_generator_commit(args.generator_commit)
         rows = read_assignments(args.assignments)
         scene_specs = group_assignments(rows)
 
@@ -860,16 +1010,15 @@ def main(argv=None):
                     f"--scene-id no encontrado en assignments: {sorted(missing)}"
                 )
 
-        allowed_source_ids = None
-        if args.cutout_manifest:
-            allowed_source_ids = load_train_source_allowlist(args.cutout_manifest)
+        allowed_source_ids = load_train_source_allowlist(args.cutout_manifest)
 
         manifest_rows, summary = generate_scenes(
             scene_specs,
             args.cutout_root,
             args.output_root,
-            background_rgb=background_rgb,
             allowed_source_ids=allowed_source_ids,
+            generator_commit=generator_commit,
+            background_rgb=background_rgb,
         )
         write_manifest(manifest_rows, args.manifest)
     except (SceneGenerationError, QAError, AssignmentError, ValueError) as exc:
@@ -877,12 +1026,13 @@ def main(argv=None):
         return 1
 
     print(f"GENERATOR_VERSION={GENERATOR_VERSION}")
+    print(f"GENERATOR_COMMIT={generator_commit}")
     print(f"MODE={'PILOT' if args.pilot else 'SELECTED' if args.scene_id else 'FULL'}")
     print(f"SCENES={summary['scenes']}")
     print(f"IMAGES={summary['images']}")
     print(f"LABELS={summary['labels']}")
     print(f"PLACEMENTS={summary['placements']}")
-    print(f"LEAKAGE_GATE={'ON' if allowed_source_ids is not None else 'OFF'}")
+    print("LEAKAGE_GATE=ON")
     print(f"MANIFEST={args.manifest}")
     print("QA=PASS")
     return 0

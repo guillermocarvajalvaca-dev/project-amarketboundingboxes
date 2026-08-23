@@ -2,8 +2,9 @@
 Tests P2-007 para src/data/make_synthetic_scenes.py
 
 Cubren geometría de oclusión, semántica de caja visible, determinismo por seed,
-rangos de transformación por dificultad, gates anti-fuga y el piloto de 30
-escenas, según
+rangos de transformación por dificultad, gates anti-fuga obligatorios,
+integridad de hash de cutout, integridad de rutas, consistencia de linaje y
+el piloto de 30 escenas, según
 docs/governance/03_PHASE2/06_SYNTHETIC_DATA_GENERATION_CONTRACT_v1_0_0.md §5-§11.
 
 TODOS los cutouts son fixtures RGBA construidos programáticamente en directorios
@@ -19,9 +20,11 @@ import pytest
 from PIL import Image
 
 from src.data.assign_synthetic_sources import (
+    AssignmentError,
     assign_sources,
     load_cutout_library,
     load_scene_plan,
+    write_assignments,
 )
 from src.data.make_boxes import compute_yolo_box
 from src.data.make_synthetic_scenes import (
@@ -42,9 +45,12 @@ from src.data.make_synthetic_scenes import (
     load_train_source_allowlist,
     main,
     parse_background_rgb,
+    resolve_cutout_path,
     select_pilot_scenes,
     transform_cutout,
+    validate_generator_commit,
     validate_outputs,
+    validate_source_lineage_consistency,
     write_manifest,
 )
 from tests.test_assign_synthetic_sources import (
@@ -52,6 +58,9 @@ from tests.test_assign_synthetic_sources import (
     write_cutout_manifest,
     write_scene_plan,
 )
+
+# SHA git fijo de fixture: nunca se autodetecta desde el repositorio real.
+FIXTURE_GENERATOR_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
 # --------------------------------------------------------------------------
@@ -84,7 +93,8 @@ def write_cutout_png(path, rgba):
 def build_cutout_library(tmp_path, count, size=(96, 128), name="cutouts"):
     """Crea `count` cutouts PNG RGBA y su manifiesto CSV train/accepted.
 
-    Devuelve (cutout_root, manifest_path, filas_del_manifiesto).
+    Devuelve (cutout_root, manifest_path, filas_del_manifiesto). El
+    cutout_sha256 de cada fila es el hash real del PNG físico escrito.
     """
     cutout_root = tmp_path / name
     rows = cutout_rows(count)
@@ -110,6 +120,21 @@ def build_scene_specs(tmp_path, scene_defs, cutout_manifest_path, plan_name="pla
     sources, _ = load_cutout_library(cutout_manifest_path, governing=False)
     assignments = assign_sources(plan, sources, governing=False)
     return group_assignments(assignments)
+
+
+def run_generate_scenes(specs, cutout_root, output_root, manifest_path, **overrides):
+    """Envoltorio de test: llena allowed_source_ids/generator_commit por defecto.
+
+    Ambos son obligatorios en generate_scenes(); este helper evita repetir el
+    boilerplate en cada test mientras conserva la posibilidad de pasar valores
+    explícitos (incluidos None) para probar los propios gates.
+    """
+    kwargs = {
+        "allowed_source_ids": load_train_source_allowlist(manifest_path),
+        "generator_commit": FIXTURE_GENERATOR_COMMIT,
+    }
+    kwargs.update(overrides)
+    return generate_scenes(specs, cutout_root, output_root, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -275,6 +300,58 @@ def test_parse_background_rgb():
 
 
 # --------------------------------------------------------------------------
+# Procedencia del generador (auditoría CHANGES_REQUIRED, punto 2)
+# --------------------------------------------------------------------------
+
+def test_validate_generator_commit_acepta_sha_completo():
+    assert validate_generator_commit(FIXTURE_GENERATOR_COMMIT) == FIXTURE_GENERATOR_COMMIT
+
+
+def test_validate_generator_commit_acepta_sha_corto():
+    assert validate_generator_commit("3ea3488") == "3ea3488"
+
+
+def test_validate_generator_commit_normaliza_mayusculas():
+    assert validate_generator_commit("3EA3488") == "3ea3488"
+
+
+def test_validate_generator_commit_rechaza_no_hex():
+    with pytest.raises(ValueError, match="SHA git"):
+        validate_generator_commit("not-a-sha!")
+
+
+def test_validate_generator_commit_rechaza_vacio():
+    with pytest.raises(ValueError, match="SHA git"):
+        validate_generator_commit("")
+
+
+def test_validate_generator_commit_rechaza_muy_corto():
+    with pytest.raises(ValueError, match="SHA git"):
+        validate_generator_commit("abc12")
+
+
+def test_generator_commit_se_registra_en_el_manifiesto(tmp_path):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+
+    for row in rows:
+        assert row["generator_commit"] == FIXTURE_GENERATOR_COMMIT
+        assert row["generator_version"]
+
+
+def test_generate_scenes_rechaza_generator_commit_invalido(tmp_path):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    with pytest.raises(ValueError, match="SHA git"):
+        run_generate_scenes(
+            specs, cutout_root, str(tmp_path / "out"), manifest_path,
+            generator_commit="no-es-un-sha",
+        )
+
+
+# --------------------------------------------------------------------------
 # Generación end-to-end con fixtures
 # --------------------------------------------------------------------------
 
@@ -285,7 +362,7 @@ def test_escena_basica_produce_label_con_lineas_exactas(tmp_path):
     )
     output_root = str(tmp_path / "out")
 
-    rows, summary = generate_scenes(specs, cutout_root, output_root)
+    rows, summary = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
 
     assert summary["scenes"] == 2
     assert summary["images"] == 2
@@ -306,7 +383,7 @@ def test_escena_basica_produce_label_con_lineas_exactas(tmp_path):
 def test_coordenadas_dentro_de_cero_uno(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 8)
     specs = build_scene_specs(tmp_path, [("medium", 4), ("hard", 6)], manifest_path)
-    rows, _ = generate_scenes(specs, cutout_root, str(tmp_path / "out"))
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
 
     for row in rows:
         for column in ("yolo_xc", "yolo_yc", "yolo_w", "yolo_h"):
@@ -320,7 +397,7 @@ def test_coordenadas_dentro_de_cero_uno(tmp_path):
 def test_manifiesto_tiene_todas_las_columnas_y_rutas_relativas(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 6)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
-    rows, _ = generate_scenes(specs, cutout_root, str(tmp_path / "out"))
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
 
     for row in rows:
         assert set(row) == set(MANIFEST_COLUMNS)
@@ -330,6 +407,7 @@ def test_manifiesto_tiene_todas_las_columnas_y_rutas_relativas(tmp_path):
         assert row["output_image_sha256"]
         assert row["output_label_sha256"]
         assert row["generator_version"]
+        assert row["generator_commit"] == FIXTURE_GENERATOR_COMMIT
         assert int(row["actual_object_count"]) == int(row["planned_object_count"])
 
 
@@ -339,8 +417,8 @@ def test_mismo_seed_produce_mismos_hashes(tmp_path):
     specs_a = build_scene_specs(tmp_path, [("basic", 3)], manifest_path, "plan_a.csv")
     specs_b = build_scene_specs(tmp_path, [("basic", 3)], manifest_path, "plan_b.csv")
 
-    rows_a, _ = generate_scenes(specs_a, cutout_root, str(tmp_path / "out_a"))
-    rows_b, _ = generate_scenes(specs_b, cutout_root, str(tmp_path / "out_b"))
+    rows_a, _ = run_generate_scenes(specs_a, cutout_root, str(tmp_path / "out_a"), manifest_path)
+    rows_b, _ = run_generate_scenes(specs_b, cutout_root, str(tmp_path / "out_b"), manifest_path)
 
     assert [r["output_image_sha256"] for r in rows_a] == [
         r["output_image_sha256"] for r in rows_b
@@ -356,12 +434,13 @@ def test_seed_distinto_produce_escena_distinta(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 6)
     specs = build_scene_specs(tmp_path, [("basic", 3)], manifest_path)
 
-    rows_a, _ = generate_scenes(specs, cutout_root, str(tmp_path / "out_a"))
+    rows_a, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out_a"), manifest_path)
 
     # Mismas fuentes y misma dificultad, pero otro scene_seed.
     other = [dict(spec) for spec in specs]
     other[0]["scene_seed"] = specs[0]["scene_seed"] + 1
-    rows_b, _ = generate_scenes(other, cutout_root, str(tmp_path / "out_b"))
+    other[0]["placements"] = [dict(p, scene_seed=other[0]["scene_seed"]) for p in specs[0]["placements"]]
+    rows_b, _ = run_generate_scenes(other, cutout_root, str(tmp_path / "out_b"), manifest_path)
 
     assert rows_a[0]["output_image_sha256"] != rows_b[0]["output_image_sha256"]
 
@@ -370,8 +449,14 @@ def test_fondo_configurable_cambia_los_pixeles(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
 
-    generate_scenes(specs, cutout_root, str(tmp_path / "white"), background_rgb=(255, 255, 255))
-    generate_scenes(specs, cutout_root, str(tmp_path / "black"), background_rgb=(0, 0, 0))
+    run_generate_scenes(
+        specs, cutout_root, str(tmp_path / "white"), manifest_path,
+        background_rgb=(255, 255, 255),
+    )
+    run_generate_scenes(
+        specs, cutout_root, str(tmp_path / "black"), manifest_path,
+        background_rgb=(0, 0, 0),
+    )
 
     white = np.array(Image.open(
         os.path.join(str(tmp_path / "white"), "images", f"{specs[0]['scene_id']}.png")
@@ -388,7 +473,7 @@ def test_rgb_del_cutout_se_conserva_en_el_compuesto(tmp_path):
     """El compositor no aplica filtros: el color opaco del cutout sobrevive."""
     cutout_root, manifest_path, rows = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
-    manifest_rows, _ = generate_scenes(specs, cutout_root, str(tmp_path / "out"))
+    manifest_rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
 
     image = np.array(Image.open(
         os.path.join(str(tmp_path / "out"), "images", f"{specs[0]['scene_id']}.png")
@@ -418,7 +503,7 @@ def test_rangos_de_transformacion_por_dificultad(tmp_path, difficulty, n_product
     specs = build_scene_specs(
         tmp_path, [(difficulty, n_products)] * 3, manifest_path
     )
-    rows, _ = generate_scenes(specs, cutout_root, str(tmp_path / "out"))
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
 
     rules = DIFFICULTY_RULES[difficulty]
     scale_lo, scale_hi = rules["scale"]
@@ -453,7 +538,7 @@ def test_escena_imposible_falla_sin_reducir_objetos(tmp_path):
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
 
     with pytest.raises(SceneGenerationError, match="agotados"):
-        generate_scenes(specs, str(cutout_root), str(tmp_path / "out"))
+        run_generate_scenes(specs, str(cutout_root), str(tmp_path / "out"), manifest_path)
 
 
 # --------------------------------------------------------------------------
@@ -461,14 +546,25 @@ def test_escena_imposible_falla_sin_reducir_objetos(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_fuente_repetida_dentro_de_escena_falla(tmp_path):
-    """Aunque el CSV de entrada venga corrupto, el compositor lo detecta."""
+    """Aunque el CSV de entrada venga corrupto, el compositor lo detecta.
+
+    Se copia el linaje COMPLETO del primer placement (no solo source_asset_id)
+    para que el único problema detectable sea la repetición dentro de la
+    escena, y no dispare primero el gate de linaje contradictorio (que cubre
+    un caso distinto: mismo source_asset_id con metadata distinta).
+    """
     _, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
 
+    first = specs[0]["placements"][0]
     corrupted = []
     for placement in specs[0]["placements"]:
         row = dict(placement)
-        row["source_asset_id"] = specs[0]["placements"][0]["source_asset_id"]
+        for field in (
+            "source_asset_id", "sku_id", "category", "metadata_status",
+            "cutout_relative_path", "cutout_sha256",
+        ):
+            row[field] = first[field]
         corrupted.append(row)
 
     with pytest.raises(SceneGenerationError, match="repetido"):
@@ -498,6 +594,7 @@ def test_fuente_val_es_rechazada_por_el_gate_antifuga(tmp_path):
             cutout_root,
             str(tmp_path / "out"),
             allowed_source_ids=allowed,
+            generator_commit=FIXTURE_GENERATOR_COMMIT,
         )
 
 
@@ -514,7 +611,9 @@ def test_fuente_test_es_rechazada_por_el_gate_antifuga(tmp_path):
     assert allowed == set()
     with pytest.raises(SceneGenerationError, match="fuga val/test"):
         generate_scenes(
-            specs, cutout_root, str(tmp_path / "out"), allowed_source_ids=allowed
+            specs, cutout_root, str(tmp_path / "out"),
+            allowed_source_ids=allowed,
+            generator_commit=FIXTURE_GENERATOR_COMMIT,
         )
 
 
@@ -523,7 +622,286 @@ def test_cutout_inexistente_falla(tmp_path):
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
 
     with pytest.raises(SceneGenerationError, match="cutout inexistente"):
-        generate_scenes(specs, str(tmp_path / "no_such_root"), str(tmp_path / "out"))
+        run_generate_scenes(
+            specs, str(tmp_path / "no_such_root"), str(tmp_path / "out"), manifest_path
+        )
+
+
+# --------------------------------------------------------------------------
+# Gate anti-fuga OBLIGATORIO (auditoría CHANGES_REQUIRED, punto 4)
+# --------------------------------------------------------------------------
+
+def test_generate_scenes_rechaza_allowed_source_ids_none(tmp_path):
+    """El leakage gate no puede omitirse pasando None: generate_scenes lo exige."""
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    with pytest.raises(ValueError, match="allowed_source_ids"):
+        generate_scenes(
+            specs, cutout_root, str(tmp_path / "out"),
+            allowed_source_ids=None,
+            generator_commit=FIXTURE_GENERATOR_COMMIT,
+        )
+
+
+def test_validate_outputs_rechaza_allowed_source_ids_none(tmp_path):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    rows, _ = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+
+    with pytest.raises(ValueError, match="allowed_source_ids"):
+        validate_outputs(
+            rows, str(tmp_path / "out"), [specs[0]["scene_id"]], allowed_source_ids=None
+        )
+
+
+def test_cli_sin_cutout_manifest_falla(tmp_path, capsys):
+    """--cutout-manifest es obligatorio: sin él, argparse rechaza la invocación."""
+    with pytest.raises(SystemExit) as excinfo:
+        main([
+            "--assignments", str(tmp_path / "assignments.csv"),
+            "--cutout-root", str(tmp_path / "cutouts"),
+            "--output-root", str(tmp_path / "out"),
+            "--manifest", str(tmp_path / "m.csv"),
+            "--generator-commit", FIXTURE_GENERATOR_COMMIT,
+        ])
+    assert excinfo.value.code != 0
+
+
+def test_cli_sin_generator_commit_falla(tmp_path):
+    """--generator-commit es obligatorio: sin él, argparse rechaza la invocación."""
+    with pytest.raises(SystemExit) as excinfo:
+        main([
+            "--assignments", str(tmp_path / "assignments.csv"),
+            "--cutout-root", str(tmp_path / "cutouts"),
+            "--output-root", str(tmp_path / "out"),
+            "--manifest", str(tmp_path / "m.csv"),
+            "--cutout-manifest", str(tmp_path / "cutout_manifest.csv"),
+        ])
+    assert excinfo.value.code != 0
+
+
+def test_cli_exitoso_siempre_reporta_leakage_gate_on(tmp_path, capsys):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 6)
+    plan_path = write_scene_plan(
+        str(tmp_path / "plan.csv"), [("basic", 2), ("basic", 3)]
+    )
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+
+    assignments_path = tmp_path / "assignments.csv"
+    write_assignments(assignments, str(assignments_path))
+
+    exit_code = main([
+        "--assignments", str(assignments_path),
+        "--cutout-root", cutout_root,
+        "--output-root", str(tmp_path / "out"),
+        "--manifest", str(tmp_path / "scene_manifest.csv"),
+        "--cutout-manifest", manifest_path,
+        "--generator-commit", FIXTURE_GENERATOR_COMMIT,
+        "--scene-id", "SYN_0001",
+        "--background-rgb", "255,255,255",
+    ])
+    assert exit_code == 0
+
+    captured = capsys.readouterr().out
+    assert "SCENES=1" in captured
+    assert "LEAKAGE_GATE=ON" in captured
+    assert f"GENERATOR_COMMIT={FIXTURE_GENERATOR_COMMIT}" in captured
+    assert "QA=PASS" in captured
+    assert os.path.exists(str(tmp_path / "out" / "images" / "SYN_0001.png"))
+    assert os.path.exists(str(tmp_path / "out" / "labels" / "SYN_0001.txt"))
+
+
+# --------------------------------------------------------------------------
+# Integridad de hash de cutout (auditoría CHANGES_REQUIRED, punto 3)
+# --------------------------------------------------------------------------
+
+def test_cutout_hash_correcto_pasa(tmp_path):
+    """El caso feliz: el sha256 físico coincide con el declarado."""
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    rows, summary = run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+    assert summary["scenes"] == 1
+
+
+def test_cutout_fisico_alterado_falla(tmp_path):
+    """Si el PNG físico cambia después de declarar su hash, la corrida debe fallar."""
+    cutout_root, manifest_path, rows = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    used_id = specs[0]["placements"][0]["source_asset_id"]
+    used_row = next(r for r in rows if r["source_asset_id"] == used_id)
+    png_path = os.path.join(cutout_root, used_row["cutout_relative_path"])
+
+    # Se reemplaza el PNG físico por otro contenido válido pero distinto:
+    # el hash declarado en el manifiesto queda desactualizado.
+    tampered = make_rgba_rectangle(50, 50, rgb=(1, 2, 3))
+    Image.fromarray(tampered, mode="RGBA").save(png_path, format="PNG")
+
+    with pytest.raises(SceneGenerationError, match="sha256 físico"):
+        run_generate_scenes(specs, cutout_root, str(tmp_path / "out"), manifest_path)
+
+
+def test_hash_declarado_incorrecto_falla(tmp_path):
+    """Si cutout_sha256 en el assignments no coincide con el archivo, falla."""
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    tampered_specs = [dict(spec) for spec in specs]
+    tampered_specs[0]["placements"] = [
+        dict(p, cutout_sha256="0" * 64) for p in specs[0]["placements"]
+    ]
+
+    with pytest.raises(SceneGenerationError, match="sha256 físico"):
+        run_generate_scenes(
+            tampered_specs, cutout_root, str(tmp_path / "out"), manifest_path
+        )
+
+
+def test_mismo_source_con_metadata_contradictoria_falla(tmp_path):
+    """El mismo source_asset_id no puede declarar linaje distinto entre placements.
+
+    3 fuentes y 2 escenas de n=2 (4 placements) fuerzan por construcción de
+    cuotas (divmod(4,3)=(1,1)) que exactamente una fuente se use dos veces, en
+    dos escenas distintas: la repetición entre escenas está garantizada, no es
+    un azar del reparto.
+    """
+    _, manifest_path, _ = build_cutout_library(tmp_path, 3)
+    specs = build_scene_specs(tmp_path, [("basic", 2), ("basic", 2)], manifest_path)
+
+    all_placements = [p for s in specs for p in s["placements"]]
+    from collections import Counter
+
+    usage = Counter(p["source_asset_id"] for p in all_placements)
+    target_id = next(source_id for source_id, count in usage.items() if count > 1)
+    assert usage[target_id] > 1  # garantizado por el reparto de cuotas 1+1
+
+    corrupted_rows = []
+    seen_target = False
+    for row in all_placements:
+        row = dict(row)
+        if row["source_asset_id"] == target_id and not seen_target:
+            seen_target = True
+        elif row["source_asset_id"] == target_id:
+            row["sku_id"] = row["sku_id"] + "-CONTRADICTORIO"
+        corrupted_rows.append(row)
+
+    with pytest.raises(SceneGenerationError, match="contradictoria"):
+        validate_source_lineage_consistency(corrupted_rows)
+
+
+def test_validate_source_lineage_consistency_pasa_con_datos_coherentes(tmp_path):
+    _, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2), ("basic", 2)], manifest_path)
+    all_placements = [p for s in specs for p in s["placements"]]
+
+    validate_source_lineage_consistency(all_placements)  # no debe lanzar
+
+
+def test_group_assignments_detecta_contradiccion_de_linaje(tmp_path):
+    """group_assignments debe abortar si el CSV de assignments trae linaje inconsistente.
+
+    Igual que el test anterior: 3 fuentes y 2 escenas de n=2 garantizan por
+    construcción de cuotas que una fuente se repite entre escenas.
+    """
+    _, manifest_path, _ = build_cutout_library(tmp_path, 3)
+    specs = build_scene_specs(tmp_path, [("basic", 2), ("basic", 2)], manifest_path)
+    all_placements = [p for s in specs for p in s["placements"]]
+
+    from collections import Counter
+
+    usage = Counter(p["source_asset_id"] for p in all_placements)
+    target_id = next(source_id for source_id, count in usage.items() if count > 1)
+
+    corrupted = [dict(p) for p in all_placements]
+    touched = False
+    for row in corrupted:
+        if row["source_asset_id"] == target_id:
+            if not touched:
+                touched = True
+                continue
+            row["category"] = (row["category"] or "") + "-DISTINTA"
+            break
+
+    with pytest.raises(SceneGenerationError, match="contradictoria"):
+        group_assignments(corrupted)
+
+
+# --------------------------------------------------------------------------
+# Integridad de rutas (auditoría CHANGES_REQUIRED, punto 5)
+# --------------------------------------------------------------------------
+
+def test_resolve_cutout_path_resuelve_ruta_normal(tmp_path):
+    cutout_root = tmp_path / "root"
+    (cutout_root / "cutouts").mkdir(parents=True)
+    target = cutout_root / "cutouts" / "a.png"
+    target.write_bytes(b"fake")
+
+    resolved = resolve_cutout_path(str(cutout_root), "cutouts/a.png")
+    assert os.path.realpath(resolved) == os.path.realpath(str(target))
+
+
+def test_resolve_cutout_path_rechaza_absoluta(tmp_path):
+    with pytest.raises(AssignmentError, match="absoluta"):
+        resolve_cutout_path(str(tmp_path), "/etc/passwd")
+
+
+def test_resolve_cutout_path_rechaza_traversal(tmp_path):
+    with pytest.raises(AssignmentError, match="traversal"):
+        resolve_cutout_path(str(tmp_path), "../outside.png")
+
+
+def test_generate_scenes_rechaza_traversal_en_placement(tmp_path):
+    """Aunque P2-006 ya valide, el compositor revalida por defensa en profundidad."""
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+
+    tampered_specs = [dict(spec) for spec in specs]
+    tampered_placements = [dict(p) for p in specs[0]["placements"]]
+    tampered_placements[0]["cutout_relative_path"] = "../../outside.png"
+    tampered_specs[0]["placements"] = tampered_placements
+
+    with pytest.raises(AssignmentError, match="traversal"):
+        run_generate_scenes(
+            tampered_specs, cutout_root, str(tmp_path / "out"), manifest_path
+        )
+
+
+# --------------------------------------------------------------------------
+# Consistencia de entrada dentro de una escena (auditoría CHANGES_REQUIRED, punto 6)
+# --------------------------------------------------------------------------
+
+def test_group_assignments_detecta_difficulty_inconsistente(tmp_path):
+    _, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    placements = [dict(p) for p in specs[0]["placements"]]
+    placements[1]["difficulty"] = "medium"
+
+    with pytest.raises(SceneGenerationError, match="difficulty"):
+        group_assignments(placements)
+
+
+def test_group_assignments_detecta_scene_seed_inconsistente(tmp_path):
+    _, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    placements = [dict(p) for p in specs[0]["placements"]]
+    placements[1]["scene_seed"] = placements[1]["scene_seed"] + 1
+
+    with pytest.raises(SceneGenerationError, match="scene_seed"):
+        group_assignments(placements)
+
+
+def test_group_assignments_detecta_planned_n_products_inconsistente(tmp_path):
+    _, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    placements = [dict(p) for p in specs[0]["placements"]]
+    placements[1]["planned_n_products"] = 99
+
+    with pytest.raises(SceneGenerationError, match="planned_n_products"):
+        group_assignments(placements)
 
 
 # --------------------------------------------------------------------------
@@ -534,69 +912,115 @@ def test_qa_detecta_label_con_lineas_de_menos(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 6)
     specs = build_scene_specs(tmp_path, [("basic", 3)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     label_path = os.path.join(output_root, rows[0]["output_label_relative_path"])
     with open(label_path, "w", encoding="utf-8") as handle:
         handle.write("0 0.500000 0.500000 0.100000 0.100000\n")
 
     with pytest.raises(QAError):
-        validate_outputs(rows, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            rows, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_coordenada_fuera_de_rango(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     tampered = [dict(row) for row in rows]
     tampered[0]["yolo_xc"] = "1.500000"
     with pytest.raises(QAError, match="fuera de \\[0,1\\]"):
-        validate_outputs(tampered, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_oclusion_por_encima_del_limite(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     tampered = [dict(row) for row in rows]
     tampered[0]["occlusion_fraction"] = "0.900000"
     with pytest.raises(QAError, match="oclusión"):
-        validate_outputs(tampered, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_visible_area_cero(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     tampered = [dict(row) for row in rows]
     tampered[0]["visible_area"] = "0"
     with pytest.raises(QAError, match="visible_area"):
-        validate_outputs(tampered, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_hash_faltante(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     tampered = [dict(row) for row in rows]
     tampered[0]["output_image_sha256"] = ""
     with pytest.raises(QAError, match="vacío"):
-        validate_outputs(tampered, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
+
+
+def test_qa_detecta_metadata_status_faltante(tmp_path):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    output_root = str(tmp_path / "out")
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
+
+    tampered = [dict(row) for row in rows]
+    tampered[0]["metadata_status"] = ""
+    with pytest.raises(QAError, match="metadata_status"):
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
+
+
+def test_qa_detecta_generator_commit_faltante(tmp_path):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
+    output_root = str(tmp_path / "out")
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
+
+    tampered = [dict(row) for row in rows]
+    tampered[0]["generator_commit"] = ""
+    with pytest.raises(QAError, match="generator_commit"):
+        validate_outputs(
+            tampered, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_imagen_modificada_por_hash(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
     specs = build_scene_specs(tmp_path, [("basic", 2)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     image_path = os.path.join(output_root, rows[0]["output_image_relative_path"])
     Image.fromarray(
@@ -604,18 +1028,23 @@ def test_qa_detecta_imagen_modificada_por_hash(tmp_path):
     ).save(image_path, format="PNG")
 
     with pytest.raises(QAError, match="sha256 de imagen"):
-        validate_outputs(rows, output_root, [specs[0]["scene_id"]])
+        validate_outputs(
+            rows, output_root, [specs[0]["scene_id"]], allowed_source_ids=allowed
+        )
 
 
 def test_qa_detecta_conteo_de_imagenes_incorrecto(tmp_path):
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 6)
     specs = build_scene_specs(tmp_path, [("basic", 2), ("basic", 3)], manifest_path)
     output_root = str(tmp_path / "out")
-    rows, _ = generate_scenes(specs, cutout_root, output_root)
+    rows, _ = run_generate_scenes(specs, cutout_root, output_root, manifest_path)
+    allowed = load_train_source_allowlist(manifest_path)
 
     os.remove(os.path.join(output_root, "images", f"{specs[1]['scene_id']}.png"))
     with pytest.raises(QAError, match="imágenes para"):
-        validate_outputs(rows, output_root, [s["scene_id"] for s in specs])
+        validate_outputs(
+            rows, output_root, [s["scene_id"] for s in specs], allowed_source_ids=allowed
+        )
 
 
 # --------------------------------------------------------------------------
@@ -689,21 +1118,19 @@ def test_piloto_falla_si_no_hay_escenas_suficientes(tmp_path):
 
 
 def test_piloto_de_fixtures_genera_30_escenas_completas(tmp_path):
-    """Piloto REAL de fixtures: 30 escenas generadas y validadas de extremo a extremo.
+    """Piloto de fixtures: 30 escenas generadas y validadas de extremo a extremo.
 
     No sustituye al piloto gobernante (P2-008), que requiere los cutouts reales
-    de P2-005; demuestra que el compositor produce las 30 escenas del gate.
+    de P2-005; demuestra que el compositor produce las 30 escenas del gate con
+    el leakage gate y generator_commit obligatorios activos.
     """
     cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 12)
     specs = build_scene_specs(tmp_path, PILOT_PLAN, manifest_path)
     pilot = select_pilot_scenes(specs)
     assert len(pilot) == 30
 
-    allowed = load_train_source_allowlist(manifest_path)
     output_root = str(tmp_path / "pilot_out")
-    rows, summary = generate_scenes(
-        pilot, cutout_root, output_root, allowed_source_ids=allowed
-    )
+    rows, summary = run_generate_scenes(pilot, cutout_root, output_root, manifest_path)
 
     assert summary["scenes"] == 30
     assert summary["images"] == 30
@@ -732,8 +1159,6 @@ def test_cli_genera_escenas_seleccionadas(tmp_path, capsys):
     assignments = assign_sources(plan, sources, governing=False)
 
     assignments_path = tmp_path / "assignments.csv"
-    from src.data.assign_synthetic_sources import write_assignments
-
     write_assignments(assignments, str(assignments_path))
 
     exit_code = main([
@@ -742,6 +1167,7 @@ def test_cli_genera_escenas_seleccionadas(tmp_path, capsys):
         "--output-root", str(tmp_path / "out"),
         "--manifest", str(tmp_path / "scene_manifest.csv"),
         "--cutout-manifest", manifest_path,
+        "--generator-commit", FIXTURE_GENERATOR_COMMIT,
         "--scene-id", "SYN_0001",
         "--background-rgb", "255,255,255",
     ])
@@ -761,8 +1187,31 @@ def test_cli_rechaza_pilot_y_scene_id_juntos(tmp_path, capsys):
         "--cutout-root", str(tmp_path),
         "--output-root", str(tmp_path / "out"),
         "--manifest", str(tmp_path / "m.csv"),
+        "--cutout-manifest", str(tmp_path / "cm.csv"),
+        "--generator-commit", FIXTURE_GENERATOR_COMMIT,
         "--pilot",
         "--scene-id", "SYN_0001",
     ])
     assert exit_code == 1
     assert "excluyentes" in capsys.readouterr().err
+
+
+def test_cli_generator_commit_invalido_falla(tmp_path, capsys):
+    cutout_root, manifest_path, _ = build_cutout_library(tmp_path, 4)
+    plan_path = write_scene_plan(str(tmp_path / "plan.csv"), [("basic", 2)])
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+    assignments_path = tmp_path / "assignments.csv"
+    write_assignments(assignments, str(assignments_path))
+
+    exit_code = main([
+        "--assignments", str(assignments_path),
+        "--cutout-root", cutout_root,
+        "--output-root", str(tmp_path / "out"),
+        "--manifest", str(tmp_path / "m.csv"),
+        "--cutout-manifest", manifest_path,
+        "--generator-commit", "not-hex!",
+    ])
+    assert exit_code == 1
+    assert "FAIL" in capsys.readouterr().err

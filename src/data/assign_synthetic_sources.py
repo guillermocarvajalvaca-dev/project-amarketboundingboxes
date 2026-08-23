@@ -6,7 +6,8 @@ de escenas sintéticas de Fase 2.
 
 Contratos aplicables:
 - docs/governance/03_PHASE2/01_CONTRACT_SDD_PHASE2_v2_0_0_FROZEN.md §6, §8
-- docs/governance/03_PHASE2/06_SYNTHETIC_DATA_GENERATION_CONTRACT_v1_0_0.md §1, §3, §4
+- docs/governance/03_PHASE2/06_SYNTHETIC_DATA_GENERATION_CONTRACT_v1_0_0.md §1, §3, §4, §9
+- docs/governance/03_PHASE2/11_ENRICHED_MANIFEST_SCHEMA.csv (linaje de categoría)
 
 Reglas gobernantes:
 - solo cutouts con status=accepted y split=train pueden ser fuente;
@@ -16,7 +17,11 @@ Reglas gobernantes:
 - el orden lexicográfico de source_asset_id congela el reparto de cuotas:
   74 productos usados 8 veces y 385 usados 7 veces (derivado de divmod(3287, 459));
 - ningún source_asset_id se repite dentro de una misma escena;
-- la asignación es totalmente determinista: mismo input => mismo output byte a byte.
+- la asignación es totalmente determinista: mismo input => mismo output byte a byte;
+- category y metadata_status se propagan literalmente desde el cutout manifest
+  (§9 del contrato de generación exige registrar categoría para análisis);
+  category puede quedar vacía, pero solo si metadata_status es explícito y no vacío;
+- ninguna ruta de cutout puede ser absoluta ni contener traversal ('..').
 
 No se usa aleatoriedad en ningún punto. Las colisiones dentro de escena se
 resuelven por rotación determinista de la cola (§4 del contrato de generación).
@@ -29,6 +34,8 @@ Uso:
 """
 import argparse
 import csv
+import os
+import re
 import sys
 from collections import Counter, deque
 
@@ -40,10 +47,15 @@ GOVERNING_SOURCE_COUNT = 459
 ACCEPTED_STATUS = "accepted"
 TRAIN_SPLIT = "train"
 
+# category se propaga literal (puede quedar vacía); metadata_status es
+# obligatorio y no vacío: es el único caso en que una categoría vacía es
+# aceptable, porque queda acompañada de un estado explícito (06_SYNTHETIC §9).
 REQUIRED_CUTOUT_COLUMNS = (
     "source_asset_id",
     "sku_id",
     "split",
+    "category",
+    "metadata_status",
     "cutout_relative_path",
     "cutout_sha256",
     "status",
@@ -63,9 +75,13 @@ ASSIGNMENT_COLUMNS = (
     "placement_index",
     "source_asset_id",
     "sku_id",
+    "category",
+    "metadata_status",
     "cutout_relative_path",
     "cutout_sha256",
 )
+
+_DRIVE_LETTER_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 class AssignmentError(ValueError):
@@ -74,6 +90,38 @@ class AssignmentError(ValueError):
 
 class SplitLeakageError(AssignmentError):
     """Se detectó un cutout aceptado que no pertenece al split train."""
+
+
+def validate_relative_path(value, column_name):
+    """Rechaza rutas absolutas o con traversal ('..') en un campo de ruta relativa.
+
+    Nunca se confía en una ruta declarada por un CSV para escapar de su raíz:
+    ni rutas absolutas POSIX ('/...'), ni rutas con unidad Windows ('C:\\...'),
+    ni segmentos '..' en ninguna posición.
+
+    Devuelve el valor saneado (sin espacios en los extremos) si es válido.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise AssignmentError(f"'{column_name}' vacío")
+
+    if (
+        os.path.isabs(text)
+        or _DRIVE_LETTER_PATTERN.match(text)
+        or text.startswith("/")
+        or text.startswith("\\")
+    ):
+        raise AssignmentError(
+            f"'{column_name}' no puede ser una ruta absoluta: {text!r}"
+        )
+
+    normalized = text.replace("\\", "/")
+    if any(part == ".." for part in normalized.split("/")):
+        raise AssignmentError(
+            f"'{column_name}' no puede contener traversal '..': {text!r}"
+        )
+
+    return text
 
 
 def _read_csv_rows(path):
@@ -159,6 +207,11 @@ def load_cutout_library(path, governing=True):
     Filtra status!=accepted. Entre las aceptadas, cualquier split distinto de
     train es fuga (01_CONTRACT §4/§13) y aborta: no se descarta en silencio.
 
+    category se preserva literal (nunca se inventa); metadata_status es
+    obligatorio y no vacío — es la única forma en que una categoría vacía
+    queda justificada (06_SYNTHETIC §9). cutout_relative_path se valida contra
+    rutas absolutas y traversal.
+
     Devuelve un dict source_asset_id -> fila, y el conteo de descartes por status.
     """
     rows, fieldnames = _read_csv_rows(path)
@@ -195,17 +248,34 @@ def load_cutout_library(path, governing=True):
                 f"cutout manifest: source_asset_id duplicado '{source_asset_id}'"
             )
 
-        for column in ("cutout_relative_path", "cutout_sha256", "sku_id"):
+        for column in ("cutout_sha256", "sku_id"):
             if not (row[column] or "").strip():
                 raise AssignmentError(
                     f"cutout manifest línea {lineno}: '{column}' vacío para "
                     f"{source_asset_id}"
                 )
 
+        cutout_relative_path = validate_relative_path(
+            row["cutout_relative_path"], "cutout_relative_path"
+        )
+
+        metadata_status = (row["metadata_status"] or "").strip()
+        if not metadata_status:
+            raise AssignmentError(
+                f"cutout manifest línea {lineno}: 'metadata_status' vacío para "
+                f"{source_asset_id} (una categoría vacía solo se permite "
+                f"acompañada de un estado de metadata explícito)"
+            )
+        # category se preserva literal; puede quedar vacía si metadata_status
+        # (ya verificado no vacío arriba) documenta por qué.
+        category = (row["category"] or "").strip()
+
         sources[source_asset_id] = {
             "source_asset_id": source_asset_id,
             "sku_id": row["sku_id"].strip(),
-            "cutout_relative_path": row["cutout_relative_path"].strip(),
+            "category": category,
+            "metadata_status": metadata_status,
+            "cutout_relative_path": cutout_relative_path,
             "cutout_sha256": row["cutout_sha256"].strip(),
         }
 
@@ -321,6 +391,8 @@ def assign_sources(scene_plan, sources, governing=True):
                 "placement_index": placement_index,
                 "source_asset_id": source_id,
                 "sku_id": source["sku_id"],
+                "category": source["category"],
+                "metadata_status": source["metadata_status"],
                 "cutout_relative_path": source["cutout_relative_path"],
                 "cutout_sha256": source["cutout_sha256"],
             })
@@ -405,6 +477,9 @@ def read_assignments(path):
     """Relee el CSV de asignaciones tipando los campos numéricos.
 
     Lo usa el compositor P2-007 para no reinterpretar el esquema por su cuenta.
+    Exige category y metadata_status: un assignments.csv producido por una
+    versión anterior de P2-006 (sin esas columnas) se rechaza explícitamente
+    en vez de generar escenas sin linaje de categoría.
     """
     rows, fieldnames = _read_csv_rows(path)
     missing = [c for c in ASSIGNMENT_COLUMNS if c not in fieldnames]
