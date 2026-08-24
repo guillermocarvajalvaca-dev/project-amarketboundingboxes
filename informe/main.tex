@@ -1,739 +1,159 @@
-% =====================================================================
-% Project AmarketBoundingBoxes — Informe final
-% Universidad Católica Boliviana "San Pablo"
-% Maestría en Ciencia de Datos e Inteligencia Artificial Aplicada
-% =====================================================================
-
-\documentclass[11pt,a4paper]{article}
-
-% ---------------------------------------------------------------------
-% PAQUETES
-% ---------------------------------------------------------------------
-
+\documentclass[11pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[spanish,es-tabla]{babel}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.25cm]{geometry}
 \usepackage{graphicx}
-\usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{caption}
 \usepackage{float}
-\usepackage{geometry}
+\usepackage{hyperref}
 \usepackage{xcolor}
+\usepackage{enumitem}
 \usepackage{array}
-\usepackage{longtable}
-\usepackage[hidelinks]{hyperref}
-
-\geometry{
-    top=2.5cm,
-    bottom=2.5cm,
-    left=2.7cm,
-    right=2.7cm
-}
-
-\graphicspath{{figuras/}}
-
+\hypersetup{colorlinks=true,linkcolor=blue!45!black,citecolor=blue!45!black,urlcolor=blue!45!black}
 \setlength{\parindent}{0pt}
-\setlength{\parskip}{0.5em}
-
-% =====================================================================
-% DOCUMENTO
-% =====================================================================
+\setlength{\parskip}{4pt}
+\setlist[itemize]{leftmargin=1.3em,itemsep=1pt,topsep=2pt}
+\captionsetup{font=small,labelfont=bf}
 
 \begin{document}
 
-% =====================================================================
-% PORTADA
-% =====================================================================
-
 \begin{titlepage}
-    \centering
-
-    % ---------------------------------------------------------------
-    % LOGO
-    %
-    % Cuando exista el archivo:
-    % informe/figuras/logo_ucb.png
-    %
-    % se mostrará automáticamente.
-    % Si todavía no existe, el documento compila igualmente.
-    % ---------------------------------------------------------------
-
-    \IfFileExists{figuras/logo_ucb.png}{
-        \includegraphics[width=0.24\textwidth]{figuras/logo_ucb.png}
-        \vspace{0.8cm}
-    }{
-        \vspace*{1cm}
-    }
-
-    {\Large \textbf{Universidad Católica Boliviana ``San Pablo''}}\\[0.3cm]
-
-    {\large Sede Santa Cruz}\\[1.2cm]
-
-    {\large
-    \textbf{Maestría en Ciencia de Datos e Inteligencia Artificial Aplicada}
-    }\\[0.5cm]
-
-    {\large Visión Computacional}\\[1.6cm]
-
-    {\Huge \textbf{Project AmarketBoundingBoxes}}\\[0.6cm]
-
-    {\Large
-    Generación automática de \emph{Bounding Boxes} y detección de productos
-    mediante YOLO
-    }\\[1.7cm]
-
-    \rule{0.75\textwidth}{0.4pt}\\[1.2cm]
-
-    {\large \textbf{Integrantes}}\\[0.6cm]
-
-    Jose Guillermo Carvajal Vaca\\[0.2cm]
-    Montserrat Barba Cardozo\\[0.2cm]
-    Pablo Andres Linares Ruiz\\[0.2cm]
-    Andrés Poiche\\[1.5cm]
-
-    \vfill
-
-    {\large Santa Cruz de la Sierra -- Bolivia}\\[0.3cm]
-
-    {\large 2026}
-
+\centering
+\includegraphics[width=.42\textwidth]{ucb-logo.png}\\[.2cm]
+{\large UNIVERSIDAD CATÓLICA BOLIVIANA ``SAN PABLO''}\\[0.1cm]
+{\large SEDE SANTA CRUZ}\\[0.8cm]
+{\large MAESTRÍA EN CIENCIA DE DATOS E INTELIGENCIA ARTIFICIAL APLICADA}\\[0.35cm]
+{\large MCI-509 PROCESAMIENTO DE IMÁGENES Y VISIÓN COMPUTACIONAL}\\[0.9cm]
+\rule{\textwidth}{0.4pt}\\[0.45cm]
+{\LARGE\bfseries Project AmarketBoundingBoxes: detección multiproducto e identificación visual de SKU}\\[0.45cm]
+\rule{\textwidth}{0.4pt}\\[0.9cm]
+{\large\textbf{Integrantes del equipo:}}\\[0.25cm]
+{\large Guillermo Carvajal Vaca\\Montserrat Barba\\Andrés Poiche\\Pablo Linares\\}
+\vfill
+{\large Santa Cruz de la Sierra, Bolivia}\\
+{\large 23 de agosto de 2026}
 \end{titlepage}
 
-% =====================================================================
-% ÍNDICE
-% =====================================================================
+% IMPORTANTE: esta sección se cerrará cuando exista evidencia de FASE 6
+% o cuando el coordinador confirme que la identificación queda solo en piloto.
+\section*{Resumen}
+\emph{Sección reservada para el cierre del informe. El resumen final de 150--200 palabras se redactará cuando se conozca el estado definitivo de la evaluación de identificación (FASE 6).}
 
-\tableofcontents
+\section{Introducción y motivación}
+El proyecto aborda un único problema end-to-end: dada una escena tipo caja o supermercado con varios productos, localizar cada producto visible e intentar asociarlo con su identidad de catálogo (SKU y nombre). El reto combina dos niveles que forman parte de la misma solución: localizar correctamente cada instancia y distinguir después variantes visualmente muy parecidas, por ejemplo presentaciones o tonos de una misma familia.
 
-\newpage
+Este tipo de sistema se aproxima a tareas de asistencia en caja, inventario visual y verificación de productos. Una solución útil no puede interpretar una caja correctamente detectada como una identidad correctamente reconocida; por ello la arquitectura conserva señales separadas dentro del mismo pipeline. YOLO11n aporta la localización y su \emph{yolo\_confidence}; sobre cada recorte detectado, el retrieval visual SIFT intenta recuperar la referencia de catálogo. La similitud de SIFT no se presenta como probabilidad calibrada de identidad ni se mezcla con la confianza del detector.
 
-% =====================================================================
-% RESUMEN
-% =====================================================================
+La motivación del trabajo es construir una línea base reproducible sobre datos propios de AMARKET que permita evaluar el flujo completo y, al mismo tiempo, identificar con honestidad cuál componente limita el desempeño del sistema.
 
-\begin{abstract}
-
-El presente trabajo desarrolla un \emph{pipeline} reproducible para la
-generación automática de \emph{bounding boxes} y el entrenamiento de un detector
-de productos a partir de imágenes reales del catálogo público de AMARKET.
-El problema se formuló inicialmente como una tarea de detección monoclase,
-donde la clase \texttt{0: product} representa cualquier producto visible,
-mientras que el SKU, nombre y descripción se conservan exclusivamente como
-metadatos de procedencia.
-
-La línea base se construyó a partir de 655 imágenes reales, particionadas de
-forma determinista con semilla 42 en 459 imágenes de entrenamiento,
-98 de validación y 98 de prueba. Las cajas se obtuvieron a partir de los
-píxeles extremos del producto y se transformaron al formato YOLO mediante una
-convención de bordes semiabiertos.
-
-El modelo gobernante de la línea base corresponde a YOLO11n. Sobre las
-98 imágenes del conjunto de prueba obtuvo una precisión de 1,0, un
-\emph{recall} de 1,0, un F1 de 1,0, un mAP@0.5 de 0,995 y un
-mAP@0.5:0.95 de 0,992875. La evaluación final se verificó adicionalmente
-en CPU. Como extensión, la segunda fase del proyecto introduce escenas
-sintéticas multiproducto manteniendo intacta la línea base real.
-
-\end{abstract}
-
-% =====================================================================
-\section{Introducción}
-% =====================================================================
-
-El etiquetado manual de \emph{bounding boxes} representa uno de los principales
-costos en la construcción de datasets para detección de objetos. Anotar
-manualmente cada producto de un catálogo comercial requiere un esfuerzo
-proporcional al número de imágenes, introduce variabilidad entre anotadores y
-dificulta la reproducción exacta del dataset.
-
-Este proyecto desarrolla un \emph{pipeline} automático de anotación utilizando
-imágenes de productos provenientes de AMARKET. Las fotografías del catálogo
-presentan una característica aprovechable: en una gran proporción de los casos
-muestran un único producto sobre fondo uniforme o transparente. Esta regularidad
-permite derivar de manera determinista una caja delimitadora a partir de los
-píxeles pertenecientes al producto.
-
-El problema se formula como una tarea de detección \textbf{monoclase}. La única
-clase utilizada por el detector es:
-
-\begin{center}
-\texttt{0: product}
-\end{center}
-
-El SKU, nombre, descripción y demás atributos comerciales no representan clases
-del modelo. Estos campos se conservan como metadatos para garantizar la
-procedencia, trazabilidad y reproducibilidad de cada activo.
-
-La primera fase del proyecto establece una línea base real, mientras que la
-segunda fase amplía el problema hacia composiciones multiproducto sintéticas sin
-alterar los conjuntos reales de validación y prueba.
-
-% =====================================================================
-\section{Objetivos}
-% =====================================================================
-
-\subsection{Objetivo general}
-
-Construir un \emph{pipeline} reproducible para generar automáticamente
-anotaciones de productos en formato YOLO y evaluar un detector de objetos sobre
-un dataset real proveniente de AMARKET.
-
-\subsection{Objetivos específicos}
-
-\begin{itemize}
-
-    \item Obtener y preservar la procedencia de los activos utilizados.
-
-    \item Validar las imágenes antes de incorporarlas al dataset.
-
-    \item Obtener automáticamente las coordenadas extremas del producto.
-
-    \item Convertir las cajas delimitadoras al formato normalizado de YOLO.
-
-    \item Construir particiones de entrenamiento, validación y prueba evitando
-    fuga de información.
-
-    \item Entrenar y evaluar una línea base de detección monoclase.
-
-    \item Mantener trazabilidad entre imágenes, anotaciones, configuración,
-    métricas y artefactos del modelo.
-
-    \item Extender el problema hacia escenas multiproducto mediante generación
-    sintética controlada.
-
-\end{itemize}
-
-% =====================================================================
-\section{Marco teórico}
-% =====================================================================
-
-\subsection{Detección de objetos}
-
-La detección de objetos combina dos problemas: la localización espacial de una
-instancia dentro de una imagen y la asignación de una categoría. La localización
-se representa normalmente mediante una caja delimitadora o
-\emph{bounding box}.
-
-En el presente trabajo todas las instancias pertenecen a una única categoría,
-\texttt{product}. Por tanto, el reto principal es determinar correctamente la
-posición y extensión espacial del producto.
-
-% ---------------------------------------------------------------------
-
-\subsection{Formato YOLO}
-
-El formato YOLO representa cada objeto mediante una línea:
-
-\begin{center}
-\texttt{<class\_id> <x\_center> <y\_center> <width> <height>}
-\end{center}
-
-Las coordenadas geométricas se normalizan respecto a la anchura y altura de la
-imagen, por lo que sus valores se encuentran en el intervalo $[0,1]$.
-
-En este proyecto:
-
-\begin{center}
-\texttt{class\_id = 0}
-\end{center}
-
-para todas las anotaciones.
-
-% ---------------------------------------------------------------------
-
-\subsection{Datasets de retail}
-
-\textbf{SKU-110K}~\cite{goldman2019} constituye un referente en detección de
-productos en escenarios de retail densamente poblados. Contiene 11.762 imágenes
-y aproximadamente 1,73 millones de cajas delimitadoras. La tarea principal es
-la localización de productos en escenas densas.
-
-\textbf{MVTec D2S}~\cite{mvtecd2s} aborda productos de supermercado mediante
-segmentación de instancias y proporciona escenarios controlados para
-entrenamiento y evaluación.
-
-\textbf{RP2K}~\cite{peng2020} se orienta al reconocimiento
-\emph{fine-grained} de productos minoristas.
-
-A diferencia de estos datasets, la línea base de AMARKET utiliza inicialmente
-fotografías de catálogo con productos aislados. Esta característica permite
-automatizar la generación de cajas delimitadoras de forma determinista.
-
-% =====================================================================
-\section{Metodología}
-% =====================================================================
-
-\subsection{Visión general del pipeline}
-
-La construcción del dataset sigue las siguientes etapas:
-
-\begin{enumerate}
-
-    \item \textbf{Adquisición y procedencia.}
-
-    Se recopilan activos públicos de AMARKET conservando identificadores,
-    enlaces, hashes y metadatos necesarios para garantizar trazabilidad.
-
-    \item \textbf{Validación de imágenes.}
-
-    Se comprueba que cada imagen pueda decodificarse correctamente y que cumpla
-    las condiciones establecidas para la línea base.
-
-    \item \textbf{Obtención de la máscara del producto.}
-
-    Se separa el producto del fondo mediante las características de transparencia
-    o uniformidad disponibles en la fotografía.
-
-    \item \textbf{Obtención de píxeles extremos.}
-
-    Sobre la máscara se calculan los extremos:
-
-    \[
-    x_{\min},\quad x_{\max},\quad
-    y_{\min},\quad y_{\max}
-    \]
-
-    \item \textbf{Conversión a formato YOLO.}
-
-    Las coordenadas se transforman a centro, anchura y altura normalizados.
-
-    \item \textbf{Particionado.}
-
-    El dataset se divide de manera determinista en entrenamiento, validación y
-    prueba.
-
-    \item \textbf{Entrenamiento y evaluación.}
-
-    Se realiza \emph{fine-tuning} de un detector YOLO11n y posteriormente se
-    evalúa el modelo congelado sobre el conjunto de prueba.
-
-\end{enumerate}
-
-% ---------------------------------------------------------------------
-
-\subsection{De píxeles extremos a coordenadas YOLO}
-
-Sea una imagen de anchura $W$ y altura $H$, y sean
-$x_{\min}$, $x_{\max}$, $y_{\min}$ y $y_{\max}$ los índices extremos del
-producto.
-
-Los límites máximos se consideran inclusivos. Para representar correctamente la
-extensión del objeto se utiliza una convención de bordes semiabiertos.
-
-Las coordenadas se calculan como:
-
-\begin{align}
-
-x_c &=
-\frac{x_{\min} + x_{\max} + 1}{2W}
-\\[4pt]
-
-y_c &=
-\frac{y_{\min} + y_{\max} + 1}{2H}
-\\[4pt]
-
-w &=
-\frac{x_{\max} - x_{\min} + 1}{W}
-\\[4pt]
-
-h &=
-\frac{y_{\max} - y_{\min} + 1}{H}
-
-\end{align}
-
-Cada anotación se escribe en formato YOLO precedida por:
-
-\begin{center}
-\texttt{class\_id = 0}
-\end{center}
-
-% ---------------------------------------------------------------------
-
-\subsection{Dataset real}
-
-El dataset canónico de la línea base contiene:
+\section{Datos}
+El conjunto real proviene de imágenes públicas de productos del catálogo de AMARKET. Se conservaron 655 imágenes reales y se utilizó semilla 42 para la partición: 459 imágenes de entrenamiento, 98 de validación y 98 de test. La tarea YOLO es monoclase, con \texttt{class\_id=0} y \texttt{class\_name=product}; SKU y nombre se mantienen como metadatos y no como clases YOLO. Los conjuntos de validación y test contienen exclusivamente imágenes reales.
 
 \begin{table}[H]
-
 \centering
-
-\caption{Distribución del dataset real de AMARKET.}
-
-\begin{tabular}{lr}
-
+\small
+\caption{Composición efectivamente utilizada en el experimento.}
+\begin{tabular}{lrrl}
 \toprule
-
-Partición & Imágenes \\
-
+Conjunto & Imágenes & Objetos/placements & Observación \\
 \midrule
-
-Entrenamiento & 459 \\
-
-Validación & 98 \\
-
-Prueba & 98 \\
-
-\midrule
-
-\textbf{Total} & \textbf{655} \\
-
+Train real & 459 & 459 & Imágenes reales aisladas \\
+Train sintético & 197 & 481 & Todas \texttt{difficulty=basic} \\
+Train combinado & 656 & -- & 459 reales + 197 sintéticas \\
+Validación & 98 & 98 & Solo imágenes reales \\
+Test & 98 & 98 & Solo imágenes reales, bloqueado \\
 \bottomrule
-
 \end{tabular}
-
 \end{table}
 
-La partición utiliza semilla:
+La generación sintética planificó originalmente 655 escenas y 3287 placements. Esa corrida no terminó y falló en \texttt{SYN\_0198}; por tanto, 655/3287 describen únicamente el diseño planificado. El entrenamiento que se documenta utilizó realmente 197 escenas sintéticas y 481 placements, combinadas con las 459 imágenes reales de train para un total de 656 imágenes de entrenamiento.
 
-\begin{center}
-\texttt{seed = 42}
-\end{center}
+Todas las escenas sintéticas disponibles para esta corrida son de dificultad \texttt{basic}. Esto limita la representación de clutter, oclusiones, iluminación variable, reflejos y fondos complejos propios de escenarios reales. No se identificó una licencia explícita del catálogo que autorice redistribuir las imágenes como dataset. En consecuencia, el conjunto se conserva en Drive privado para uso académico y no se redistribuye públicamente. La procedencia del catálogo es AMARKET (\url{https://amarket.com.bo/}); documentar la fuente no equivale a atribuir una licencia inexistente.
 
-y mantiene separados los activos correspondientes a entrenamiento, validación y
-prueba.
+\section{Metodología y arquitectura}
+\textbf{Pipeline integrado.} La solución se modela como una única arquitectura de dos etapas encadenadas. Primero, YOLO11n localiza cada producto mediante bounding boxes. Después, cada recorte detectado se entrega al módulo de retrieval visual SIFT, que intenta asociarlo con una referencia de catálogo y recuperar SKU y nombre. Estas etapas no constituyen dos entregas independientes: juntas forman el flujo de inferencia del proyecto.
 
-% ---------------------------------------------------------------------
+\textbf{Composición sintética.} Las imágenes reales de entrenamiento se complementaron con escenas sintéticas multiproducto. Para mantener trazabilidad, solo se consideran las 197 escenas que realmente estaban disponibles y fueron utilizadas; no se atribuye al experimento la corrida planificada de 655 escenas que no finalizó.
 
-\subsection{Prevención de fuga de información}
+\textbf{Detector.} Se utilizó YOLO11n preentrenado y adaptado a una única clase. Se ejecutaron dos corridas comparables, B0 y T1, ambas durante 40 épocas. T1 registra \texttt{imgsz=512}, \texttt{batch=8}, semilla 42 y entrenamiento determinista. Con \texttt{optimizer=auto}, Ultralytics resolvió AdamW con learning rate inicial 0.002, momentum 0.9 y \texttt{weight\_decay=0.0005}. El criterio de selección se fijó sobre validación: mayor mAP50-95, sin utilizar test para escoger hiperparámetros.
 
-La separación entre conjuntos no se realiza únicamente por nombre de archivo.
-La procedencia de los activos se conserva mediante identificadores, hashes y
-grupos de duplicados.
+\textbf{Identificación.} SIFT calcula descriptores locales de cada recorte y los compara con las referencias de catálogo. El resultado de retrieval se evalúa mediante Top-1 y Top-5. La puntuación mostrada junto al nombre en las imágenes anotadas corresponde a \emph{yolo\_confidence} de la caja, no a una probabilidad de que la identidad recuperada sea correcta. La similitud SIFT debe interpretarse y reportarse por separado.
 
-El objetivo es evitar que versiones del mismo producto o activos equivalentes
-aparezcan simultáneamente en entrenamiento y evaluación.
+\subsection*{Reproducibilidad}
+La semilla contractual es 42 y los splits reales permanecen definidos. La evidencia entregada por el coordinador registra que \texttt{notebooks/inferencia\_cpu.ipynb} fue ejecutado mediante \texttt{nbconvert --execute}, equivalente a Restart \& Run All, con CPU forzado, artefactos reales, sin rutas absolutas hardcodeadas y exit code 0. Este informe atribuye esa ejecución a la evidencia del coordinador; no afirma que se haya ejecutado nuevamente en la máquina usada para redactar el documento.
 
-Las verificaciones realizadas sobre el dataset canónico no detectaron:
+El test del detector permaneció bloqueado hasta completar la selección del modelo. T1 se seleccionó por validación antes de abrir el test y no se realizó tuning posterior utilizando los resultados de test.
 
-\begin{itemize}
-
-    \item clases inválidas;
-    \item cajas inválidas;
-    \item imágenes huérfanas;
-    \item etiquetas huérfanas;
-    \item fugas entre las particiones gobernantes.
-
-\end{itemize}
-
-% =====================================================================
-\section{Entrenamiento}
-% =====================================================================
-
-La línea base gobernante utiliza la arquitectura:
-
-\begin{center}
-\textbf{YOLO11n}
-\end{center}
-
-El entrenamiento se realiza únicamente sobre el conjunto de entrenamiento y las
-decisiones de selección de modelo se realizan utilizando el conjunto de
-validación.
-
-La partición de prueba permanece bloqueada durante el ajuste y se utiliza
-únicamente en la evaluación final del modelo seleccionado.
-
-La evaluación final fue ejecutada adicionalmente en CPU para verificar que la
-inferencia no dependiera de CUDA ni de hardware especializado.
-
-% =====================================================================
-\section{Resultados de la línea base}
-% =====================================================================
-
-\subsection{Evaluación sobre el conjunto de prueba}
-
-El conjunto de prueba está compuesto por:
-
-\begin{center}
-\textbf{98 imágenes reales de AMARKET}
-\end{center}
-
-Los resultados obtenidos por el modelo gobernante fueron:
+\section{Resultados observados hasta el cierre parcial}
+\subsection*{Detector}
+B0 y T1 completaron las 40 épocas planificadas. El mayor mAP50-95 observado en validación fue 0.98679 para B0 y 0.99093 para T1; por ello T1 fue seleccionado. Después de congelar esa selección se ejecutó una única evaluación sobre el test real: Precision=0.9857, Recall=1.0000, mAP50=0.9941 y mAP50-95=0.9715. No hubo tuning posterior mirando test.
 
 \begin{table}[H]
-
 \centering
-
-\caption{Métricas finales de la línea base sobre el conjunto de prueba.}
-
-\begin{tabular}{lc}
-
+\small
+\caption{Resultados observados del detector.}
+\begin{tabular}{lcccc}
 \toprule
-
-Métrica & Valor \\
-
+Evaluación & Precision & Recall & mAP50 & mAP50-95 \\
 \midrule
-
-Precisión & 1.000000 \\
-
-Recall & 1.000000 \\
-
-F1 & 1.000000 \\
-
-mAP@0.5 & 0.995000 \\
-
-mAP@0.5:0.95 & 0.992875 \\
-
+B0, mejor validación & -- & -- & -- & 0.98679 \\
+T1, mejor validación & -- & -- & -- & \textbf{0.99093} \\
+T1, test real & 0.9857 & 1.0000 & 0.9941 & 0.9715 \\
 \bottomrule
-
 \end{tabular}
-
 \end{table}
 
-Estos valores corresponden exclusivamente a la evaluación de la línea base real
-y no deben interpretarse como resultados de escenarios multiproducto.
+\begin{figure}[H]
+\centering
+\includegraphics[width=.91\textwidth]{figuras/t1_train_val_results.png}
+\caption{Artefacto real de entrenamiento de T1 durante 40 épocas. Incluye pérdidas de train/val y métricas de validación; no fue regenerado para el informe.}
+\label{fig:t1curves}
+\end{figure}
 
-% ---------------------------------------------------------------------
+\subsection*{Identificación: evidencia disponible, no cierre final}
+Existe una validación piloto gobernada de 10 escenas y 20 productos. En ella SIFT obtuvo Top-1 accuracy=35\% y Top-5 accuracy=50\%. Estas cifras se documentan únicamente como evidencia piloto y no se presentan como evaluación final completa del módulo de identificación.
 
-\subsection{Artefacto del modelo}
+La evaluación end-to-end prevista sobre las 197 escenas y 481 productos se encuentra en ejecución fuera de esta máquina. Mientras no exista evidencia de finalización con exit code 0, el informe no asignará a esa evaluación estado PASS, FAIL ni métrica final. Si FASE 6 concluye antes del cierre, su métrica observada reemplazará este estado provisional en el PDF final. Si no concluye, el informe final declarará explícitamente que la identificación quedó evaluada solo mediante validación piloto.
 
-El modelo gobernante corresponde al artefacto de la línea base de la Fase 1.
+\begin{figure}[H]
+\centering
+\includegraphics[width=.72\textwidth]{figuras/syn0001_identity_error.png}
+\caption{\texttt{SYN\_0001}: las dos cajas están correctamente localizadas, pero las identidades recuperadas no coinciden exactamente con el ground truth. El sérum real es Izeze Hyper Caa Cica (SKU 8809686120260) y se recupera Izeze Vita Lemon Cna (SKU 8809686120338); el labial real es Maybelline tono 505 Entertainer (SKU 041554098228) y se recupera tono 500 Insider (SKU 041554098211). Los valores 0.96 y 0.90 son confianza YOLO de detección, no confianza de identidad.}
+\label{fig:synerror}
+\end{figure}
 
-La arquitectura utilizada es YOLO11n y la evaluación final fue realizada sobre
-las 98 imágenes reservadas para prueba.
+\section{Discusión y limitaciones}
+La evidencia observada sugiere que la localización de productos está bien resuelta dentro del dominio evaluado, mientras que la identificación exacta de variantes sigue siendo el componente más sensible. Esto debe interpretarse como desempeño de componentes dentro de un único pipeline, no como dos entregas separadas. Una caja puede tener alta confianza YOLO y aun así recuperar una variante o SKU incorrecto.
 
-El entrenamiento se considera congelado para esta línea base y no se realizan
-ajustes posteriores utilizando información proveniente del conjunto de prueba.
+Las limitaciones principales son cuatro. Primero, el entrenamiento sintético realmente usado cubre solo 197 escenas de dificultad básica y no representa de forma suficiente clutter, oclusiones, reflejos ni condiciones de iluminación complejas. Segundo, las imágenes reales de origen son principalmente productos aislados, por lo que existe una brecha respecto de escenas reales multiproducto. Tercero, SIFT depende de textura y keypoints locales, lo que dificulta separar productos de una misma familia cuando los cambios están concentrados en texto pequeño, tonos o detalles del empaque. Cuarto, la evaluación completa de identificación aún no dispone de evidencia de finalización; por ello 35\% Top-1 y 50\% Top-5 deben leerse exclusivamente como validación piloto de 20 productos.
 
-% =====================================================================
-\section{Extensión multiproducto: Fase 2}
-% =====================================================================
+No se identificó una licencia explícita que autorice redistribuir el catálogo como dataset, por lo que los datos permanecen privados para uso académico. Asimismo, no se afirma una garantía absoluta de ausencia de fuga más allá del protocolo de partición aplicado. El test permaneció bloqueado hasta seleccionar T1 y no se reutilizó para ajustar el modelo.
 
-La segunda fase del proyecto preserva íntegramente la línea base de la Fase 1 y
-extiende el problema hacia escenas que contienen varios productos.
-
-Para ello se definió un segundo experimento de entrenamiento que combina los
-productos reales del conjunto de entrenamiento con escenas sintéticas
-multiproducto.
-
-La arquitectura experimental establece:
-
-\begin{itemize}
-
-    \item \textbf{Experimento A:} línea base real de la Fase 1.
-
-    \item \textbf{Experimento B:} entrenamiento real más escenas sintéticas
-    multiproducto.
-
-\end{itemize}
-
-Las imágenes reales de validación y prueba se mantienen inalteradas para
-garantizar que la comparación entre experimentos utilice el mismo dominio de
-evaluación.
-
-La generación sintética se define exclusivamente a partir de activos pertenecientes
-al conjunto de entrenamiento, evitando utilizar productos procedentes de
-validación o prueba.
-
-El diseño gobernante contempla 655 escenas sintéticas y 3287 colocaciones de
-productos distribuidas entre diferentes niveles de dificultad y cantidad de
-objetos por escena.
-
-Las cajas de las escenas sintéticas se calculan a partir de la máscara visible
-final de cada producto después de aplicar composición y oclusión.
-
-Los resultados cuantitativos del Experimento B deben incorporarse únicamente
-cuando su ejecución y evidencia correspondiente se encuentren formalmente
-cerradas.
-
-% =====================================================================
-\section{Discusión}
-% =====================================================================
-
-Los resultados de la línea base demuestran que las características visuales de
-las fotografías de catálogo permiten construir automáticamente anotaciones de
-alta consistencia.
-
-El desempeño obtenido debe interpretarse considerando que las imágenes de la
-línea base contienen principalmente productos aislados sobre fondos
-controlados. Por ello, el alto rendimiento del detector no implica
-necesariamente el mismo comportamiento en escenas densas, con oclusiones,
-múltiples productos o fondos complejos.
-
-Precisamente esta limitación motiva la extensión planteada en la Fase 2, donde se
-introducen composiciones multiproducto para analizar la capacidad de
-generalización del detector frente a escenarios progresivamente más complejos.
-
-% =====================================================================
-\section{Limitaciones}
-% =====================================================================
-
-La línea base presenta varias limitaciones:
-
-\begin{itemize}
-
-    \item El dataset real procede de un único comercio electrónico.
-
-    \item Las convenciones fotográficas del catálogo reducen la diversidad de
-    fondos y condiciones de iluminación.
-
-    \item Las imágenes reales de la Fase 1 representan principalmente productos
-    aislados.
-
-    \item Las métricas elevadas obtenidas en el conjunto de prueba no deben
-    extrapolarse automáticamente a fotografías de estanterías o escenarios
-    multiproducto.
-
-    \item La extensión sintética permite introducir oclusión y múltiples
-    productos, pero una escena sintética no sustituye completamente la
-    variabilidad de una fotografía real capturada en tienda.
-
-\end{itemize}
-
-Por estas razones, los resultados de cada experimento deben interpretarse dentro
-del dominio específico sobre el cual fue evaluado.
-
-% =====================================================================
-\section{Conclusiones}
-% =====================================================================
-
-El proyecto demuestra que es posible automatizar de forma reproducible la
-generación de \emph{bounding boxes} a partir de fotografías de catálogo cuando
-existen condiciones visuales suficientemente controladas.
-
-La línea base fue construida utilizando 655 imágenes reales de AMARKET,
-manteniendo trazabilidad de los activos y una división determinista en
-459 imágenes de entrenamiento, 98 de validación y 98 de prueba.
-
-El modelo YOLO11n seleccionado alcanzó una precisión y un \emph{recall} de
-1,0, un mAP@0.5 de 0,995 y un mAP@0.5:0.95 de 0,992875 sobre el conjunto
-real de prueba.
-
-Además del resultado del modelo, uno de los principales aportes del proyecto es
-la reproducibilidad del proceso: adquisición, validación, generación de cajas,
-particionado, entrenamiento y evaluación se encuentran separados en etapas
-auditables y versionadas.
-
-La segunda fase amplía el alcance hacia escenas multiproducto sintéticas,
-manteniendo intacta la línea base real para permitir comparaciones controladas
-entre ambos escenarios.
-
-% =====================================================================
-\section{Reproducibilidad}
-% =====================================================================
-
-\subsection{Entorno}
-
-La ejecución del proyecto se realiza en un entorno Python versionado. Para las
-validaciones recientes del proyecto se utilizó Python 3.11.9.
-
-La configuración, scripts, manifiestos y evidencia se conservan dentro del
-repositorio, permitiendo reconstruir las distintas etapas del pipeline.
-
-% ---------------------------------------------------------------------
-
-\subsection{Comandos principales}
-
-El pipeline se ejecuta mediante scripts independientes desde línea de comandos.
-
-Ejemplos de las operaciones principales son:
-
-\begin{verbatim}
-
-python src/scraper_extraction.py --smoke-test --limit 3
-
-python src/data/make_boxes.py
-
-python src/data/make_splits.py
-
-python src/train.py --config configs/baseline.yaml
-
-python src/evaluate.py --weights <peso> --split test
-
-python src/predict.py --weights <peso> --source <imagen>
-
-\end{verbatim}
-
-% ---------------------------------------------------------------------
-
-\subsection{Determinismo}
-
-La semilla utilizada para el particionado gobernante es:
-
-\begin{center}
-\texttt{42}
-\end{center}
-
-Cada etapa relevante conserva información suficiente para relacionar los
-resultados con los activos de entrada, las configuraciones y los artefactos de
-modelo correspondientes.
-
-% =====================================================================
 \section{Trabajo futuro}
-% =====================================================================
-
-Como líneas de trabajo futuro se consideran:
-
 \begin{itemize}
-
-    \item evaluar formalmente el Experimento B multiproducto;
-
-    \item analizar el efecto de diferentes niveles de oclusión;
-
-    \item comparar desempeño entre imágenes de catálogo y escenarios
-    multiproducto;
-
-    \item ampliar el dominio hacia imágenes reales de estanterías;
-
-    \item analizar latencia y rendimiento de inferencia bajo diferentes
-    dispositivos;
-
-    \item estudiar robustez frente a fondos complejos y productos parcialmente
-    visibles.
-
+\item Sustituir o complementar SIFT con embeddings visuales preentrenados y congelar un protocolo Top-$k$ comparable.
+\item Incorporar más referencias por SKU y por variante, especialmente tonos y presentaciones muy similares.
+\item Construir escenas reales multiproducto con mayor clutter, iluminación y oclusión manteniendo splits independientes.
+\item Optimizar y cachear descriptores o embeddings del catálogo para reducir el costo de retrieval sin alterar el protocolo de evaluación.
 \end{itemize}
 
-% =====================================================================
-% BIBLIOGRAFÍA
-% =====================================================================
+% IMPORTANTE: no cerrar esta sección hasta conocer el estado definitivo de FASE 6.
+\section{Conclusiones}
+\emph{Sección reservada para el cierre final. Las conclusiones se redactarán después de incorporar la métrica observada de FASE 6 si la evaluación completa finaliza; de lo contrario, declararán explícitamente que la identificación quedó evaluada únicamente mediante el piloto gobernado.}
 
+\clearpage
 \begin{thebibliography}{9}
+\bibitem{ultralytics2024}
+G. Jocher y J. Qiu. \textit{Ultralytics YOLO11}, 2024. Documentación oficial: \url{https://docs.ultralytics.com/models/yolo11}.
 
-\bibitem{goldman2019}
+\bibitem{lowe2004}
+D. G. Lowe. ``Distinctive Image Features from Scale-Invariant Keypoints''. \textit{International Journal of Computer Vision}, 60(2):91--110, 2004.
 
-E.~Goldman,
-R.~Herzig,
-A.~Eisenschtat,
-J.~Goldberger
-y T.~Hassner.
-
-\newblock
-\emph{Precise Detection in Densely Packed Scenes}.
-
-\newblock
-CVPR, 2019.
-
-\newblock
-\url{https://openaccess.thecvf.com/content_CVPR_2019/html/Goldman_Precise_Detection_in_Densely_Packed_Scenes_CVPR_2019_paper.html}
-
-
-\bibitem{peng2020}
-
-J.~Peng,
-C.~Xiao
-y Y.~Li.
-
-\newblock
-\emph{RP2K: A Large-Scale Retail Product Dataset for Fine-Grained Image Classification}.
-
-\newblock
-arXiv:2006.12634, 2020.
-
-\newblock
-\url{https://arxiv.org/abs/2006.12634}
-
-
-\bibitem{mvtecd2s}
-
-MVTec Software GmbH.
-
-\newblock
-\emph{MVTec D2S: Densely Segmented Supermarket Dataset}.
-
-\newblock
-\url{https://www.mvtec.com/company/research/datasets/mvtec-d2s}
-
+\bibitem{amarket}
+AMARKET Bolivia. Catálogo público utilizado como fuente de imágenes de producto. \url{https://amarket.com.bo/}. No se identificó una licencia explícita que autorice su redistribución como dataset.
 \end{thebibliography}
-
-% =====================================================================
 
 \end{document}
