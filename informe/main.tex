@@ -1,12 +1,14 @@
 % =====================================================================
 % Project AmarketBoundingBoxes — Informe final
-% ESQUELETO. Contiene solo estructura y contenido verificado.
-% Ningun numero de resultados, ninguna metrica y ninguna cita sin
-% verificar. Todo lo pendiente esta marcado con:
-%   % TODO-RESULTADOS  -> requiere evidencia de G4/G5
-%   % TODO-CITAS       -> requiere referencia verificada
+% Universidad Católica Boliviana "San Pablo"
+% Maestría en Ciencia de Datos e Inteligencia Artificial Aplicada
 % =====================================================================
+
 \documentclass[11pt,a4paper]{article}
+
+% ---------------------------------------------------------------------
+% PAQUETES
+% ---------------------------------------------------------------------
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -14,326 +16,724 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{float}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{longtable}
 \usepackage[hidelinks]{hyperref}
+
+\geometry{
+    top=2.5cm,
+    bottom=2.5cm,
+    left=2.7cm,
+    right=2.7cm
+}
 
 \graphicspath{{figuras/}}
 
-\title{Project AmarketBoundingBoxes \\
-       \large Dataset YOLO automático desde Amarket}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.5em}
 
-\author{
-  Guillermo Carvajal Vaca \and
-  Monserrat Barba \and
-  Pablo Linares \and
-  Andrés Poiche
-}
-
-\date{Visión Computacional \\ Entrega: 19 de agosto de 2026}
+% =====================================================================
+% DOCUMENTO
+% =====================================================================
 
 \begin{document}
 
-\maketitle
+% =====================================================================
+% PORTADA
+% =====================================================================
+
+\begin{titlepage}
+    \centering
+
+    % ---------------------------------------------------------------
+    % LOGO
+    %
+    % Cuando exista el archivo:
+    % informe/figuras/logo_ucb.png
+    %
+    % se mostrará automáticamente.
+    % Si todavía no existe, el documento compila igualmente.
+    % ---------------------------------------------------------------
+
+    \IfFileExists{figuras/logo_ucb.png}{
+        \includegraphics[width=0.24\textwidth]{figuras/logo_ucb.png}
+        \vspace{0.8cm}
+    }{
+        \vspace*{1cm}
+    }
+
+    {\Large \textbf{Universidad Católica Boliviana ``San Pablo''}}\\[0.3cm]
+
+    {\large Sede Santa Cruz}\\[1.2cm]
+
+    {\large
+    \textbf{Maestría en Ciencia de Datos e Inteligencia Artificial Aplicada}
+    }\\[0.5cm]
+
+    {\large Visión Computacional}\\[1.6cm]
+
+    {\Huge \textbf{Project AmarketBoundingBoxes}}\\[0.6cm]
+
+    {\Large
+    Generación automática de \emph{Bounding Boxes} y detección de productos
+    mediante YOLO
+    }\\[1.7cm]
+
+    \rule{0.75\textwidth}{0.4pt}\\[1.2cm]
+
+    {\large \textbf{Integrantes}}\\[0.6cm]
+
+    Jose Guillermo Carvajal Vaca\\[0.2cm]
+    Montserrat Barba Cardozo\\[0.2cm]
+    Pablo Andres Linares Ruiz\\[0.2cm]
+    Andrés Poiche\\[1.5cm]
+
+    \vfill
+
+    {\large Santa Cruz de la Sierra -- Bolivia}\\[0.3cm]
+
+    {\large 2026}
+
+\end{titlepage}
 
 % =====================================================================
+% ÍNDICE
+% =====================================================================
+
+\tableofcontents
+
+\newpage
+
+% =====================================================================
+% RESUMEN
+% =====================================================================
+
 \begin{abstract}
-% TODO-RESULTADOS
-% El resumen debe tener entre 150 y 200 palabras e incluir las metricas
-% finales. No se redacta hasta cerrar G5: escribirlo antes obligaria a
-% inventar cifras.
+
+El presente trabajo desarrolla un \emph{pipeline} reproducible para la
+generación automática de \emph{bounding boxes} y el entrenamiento de un detector
+de productos a partir de imágenes reales del catálogo público de AMARKET.
+El problema se formuló inicialmente como una tarea de detección monoclase,
+donde la clase \texttt{0: product} representa cualquier producto visible,
+mientras que el SKU, nombre y descripción se conservan exclusivamente como
+metadatos de procedencia.
+
+La línea base se construyó a partir de 655 imágenes reales, particionadas de
+forma determinista con semilla 42 en 459 imágenes de entrenamiento,
+98 de validación y 98 de prueba. Las cajas se obtuvieron a partir de los
+píxeles extremos del producto y se transformaron al formato YOLO mediante una
+convención de bordes semiabiertos.
+
+El modelo gobernante de la línea base corresponde a YOLO11n. Sobre las
+98 imágenes del conjunto de prueba obtuvo una precisión de 1,0, un
+\emph{recall} de 1,0, un F1 de 1,0, un mAP@0.5 de 0,995 y un
+mAP@0.5:0.95 de 0,992875. La evaluación final se verificó adicionalmente
+en CPU. Como extensión, la segunda fase del proyecto introduce escenas
+sintéticas multiproducto manteniendo intacta la línea base real.
+
 \end{abstract}
 
 % =====================================================================
 \section{Introducción}
+% =====================================================================
 
-El etiquetado manual de \emph{bounding boxes} no escala. Anotar a mano cada
-producto de un catálogo comercial exige un esfuerzo proporcional al número de
-imágenes, es costoso de verificar y difícil de reproducir: dos anotadores
-distintos producen cajas distintas sobre la misma fotografía.
+El etiquetado manual de \emph{bounding boxes} representa uno de los principales
+costos en la construcción de datasets para detección de objetos. Anotar
+manualmente cada producto de un catálogo comercial requiere un esfuerzo
+proporcional al número de imágenes, introduce variabilidad entre anotadores y
+dificulta la reproducción exacta del dataset.
 
-Este trabajo construye un \emph{pipeline} automático de anotación a partir de un
-catálogo real. Las fotografías de producto de un comercio electrónico presentan
-una regularidad aprovechable: muestran un único artículo aislado sobre fondo
-uniforme o transparente. Esa regularidad permite derivar la caja delimitadora de
-forma determinista a partir de los píxeles extremos del producto, sin
-intervención humana y sin ambigüedad entre anotadores.
+Este proyecto desarrolla un \emph{pipeline} automático de anotación utilizando
+imágenes de productos provenientes de AMARKET. Las fotografías del catálogo
+presentan una característica aprovechable: en una gran proporción de los casos
+muestran un único producto sobre fondo uniforme o transparente. Esta regularidad
+permite derivar de manera determinista una caja delimitadora a partir de los
+píxeles pertenecientes al producto.
 
-El objetivo es un dataset de detección \textbf{monoclase}. La única clase es
-\texttt{0: product}. El SKU, el nombre y la descripción se conservan como
-metadatos de procedencia y trazabilidad, no como clases: el problema abordado es
-\emph{dónde} está el producto, no \emph{cuál} es.
+El problema se formula como una tarea de detección \textbf{monoclase}. La única
+clase utilizada por el detector es:
+
+\begin{center}
+\texttt{0: product}
+\end{center}
+
+El SKU, nombre, descripción y demás atributos comerciales no representan clases
+del modelo. Estos campos se conservan como metadatos para garantizar la
+procedencia, trazabilidad y reproducibilidad de cada activo.
+
+La primera fase del proyecto establece una línea base real, mientras que la
+segunda fase amplía el problema hacia composiciones multiproducto sintéticas sin
+alterar los conjuntos reales de validación y prueba.
+
+% =====================================================================
+\section{Objetivos}
+% =====================================================================
+
+\subsection{Objetivo general}
+
+Construir un \emph{pipeline} reproducible para generar automáticamente
+anotaciones de productos en formato YOLO y evaluar un detector de objetos sobre
+un dataset real proveniente de AMARKET.
+
+\subsection{Objetivos específicos}
+
+\begin{itemize}
+
+    \item Obtener y preservar la procedencia de los activos utilizados.
+
+    \item Validar las imágenes antes de incorporarlas al dataset.
+
+    \item Obtener automáticamente las coordenadas extremas del producto.
+
+    \item Convertir las cajas delimitadoras al formato normalizado de YOLO.
+
+    \item Construir particiones de entrenamiento, validación y prueba evitando
+    fuga de información.
+
+    \item Entrenar y evaluar una línea base de detección monoclase.
+
+    \item Mantener trazabilidad entre imágenes, anotaciones, configuración,
+    métricas y artefactos del modelo.
+
+    \item Extender el problema hacia escenas multiproducto mediante generación
+    sintética controlada.
+
+\end{itemize}
 
 % =====================================================================
 \section{Marco teórico}
+% =====================================================================
 
-\subsection{Detección de objetos y formato YOLO}
+\subsection{Detección de objetos}
 
-La detección de objetos localiza instancias mediante cajas delimitadoras y les
-asigna una categoría. El formato de anotación YOLO codifica cada caja en
-coordenadas relativas al tamaño de la imagen, con una línea por objeto:
+La detección de objetos combina dos problemas: la localización espacial de una
+instancia dentro de una imagen y la asignación de una categoría. La localización
+se representa normalmente mediante una caja delimitadora o
+\emph{bounding box}.
+
+En el presente trabajo todas las instancias pertenecen a una única categoría,
+\texttt{product}. Por tanto, el reto principal es determinar correctamente la
+posición y extensión espacial del producto.
+
+% ---------------------------------------------------------------------
+
+\subsection{Formato YOLO}
+
+El formato YOLO representa cada objeto mediante una línea:
 
 \begin{center}
 \texttt{<class\_id> <x\_center> <y\_center> <width> <height>}
 \end{center}
 
-Los cuatro valores geométricos están normalizados al intervalo $[0,1]$, lo que
-hace la anotación independiente de la resolución. En un dataset monoclase,
-\texttt{class\_id} es siempre \texttt{0}.
+Las coordenadas geométricas se normalizan respecto a la anchura y altura de la
+imagen, por lo que sus valores se encuentran en el intervalo $[0,1]$.
 
-\subsection{Datasets de retail densamente anotados}
+En este proyecto:
 
-\textbf{SKU-110K}~\cite{goldman2019} es el referente en detección de productos en
-estantería. Contiene 11.762 imágenes con aproximadamente 1,73 millones de cajas
-delimitadoras, y está anotado como un \textbf{único tipo de objeto}: el problema
-que plantea es de localización en escenas densas, no de identificación del
-artículo. Conviene precisar que el «110K» del nombre alude a la diversidad de
-SKU distintos presentes en las escenas, no al número de imágenes ni al de cajas,
-y que esa diversidad no se traduce en clases anotadas.
+\begin{center}
+\texttt{class\_id = 0}
+\end{center}
 
-\textbf{MVTec D2S}~\cite{mvtecd2s} (\emph{Densely Segmented Supermarket}) aporta
-segmentación de instancias sobre productos de supermercado, con separación
-deliberada entre las condiciones de entrenamiento y las de evaluación.
+para todas las anotaciones.
 
-\textbf{RP2K}~\cite{peng2020} se orienta al reconocimiento \emph{fine-grained} de
-productos de venta minorista, es decir, a distinguir artículos concretos entre sí.
+% ---------------------------------------------------------------------
 
-La diferencia con el presente trabajo es de escena y de objetivo. Los tres
-datasets citados operan sobre escenas multiproducto capturadas en tienda; aquí se
-parte de fotografías de catálogo con un único producto aislado sobre fondo
-controlado, lo que habilita la derivación determinista de la caja.
+\subsection{Datasets de retail}
 
-\subsection{Antecedentes en Retail Product Checkout}
+\textbf{SKU-110K}~\cite{goldman2019} constituye un referente en detección de
+productos en escenarios de retail densamente poblados. Contiene 11.762 imágenes
+y aproximadamente 1,73 millones de cajas delimitadoras. La tarea principal es
+la localización de productos en escenas densas.
 
-% TODO-CITAS
-% Faltan 6 referencias de la literatura RPC, pendientes de verificacion.
-% No se citan hasta comprobar autoria, venue y anio en la fuente original.
-% RPC se menciona unicamente como antecedente cientifico: no es el dataset
-% objetivo de este trabajo, segun el contrato congelado.
+\textbf{MVTec D2S}~\cite{mvtecd2s} aborda productos de supermercado mediante
+segmentación de instancias y proporciona escenarios controlados para
+entrenamiento y evaluación.
+
+\textbf{RP2K}~\cite{peng2020} se orienta al reconocimiento
+\emph{fine-grained} de productos minoristas.
+
+A diferencia de estos datasets, la línea base de AMARKET utiliza inicialmente
+fotografías de catálogo con productos aislados. Esta característica permite
+automatizar la generación de cajas delimitadoras de forma determinista.
 
 % =====================================================================
 \section{Metodología}
+% =====================================================================
 
-\subsection{Visión general del \emph{pipeline}}
+\subsection{Visión general del pipeline}
 
-El proceso encadena seis etapas, cada una con propietario y contrato definidos:
+La construcción del dataset sigue las siguientes etapas:
 
 \begin{enumerate}
-  \item \textbf{Adquisición.} \texttt{src/scraper\_extraction.py} recorre el
-        catálogo público de Amarket y descarga fotografías candidatas junto con
-        su procedencia, produciendo un \emph{manifest} determinista.
-  \item \textbf{Validación de fondo.} Se acepta una imagen solo si decodifica,
-        contiene un único producto principal y su fondo es transparente
-        (canal alfa) o uniforme (RGB). Todo rechazo queda registrado con su
-        motivo.
-  \item \textbf{Píxeles extremos.} Sobre la máscara del producto se obtienen los
-        cuatro extremos inclusivos $x_{\min}$, $x_{\max}$, $y_{\min}$,
-        $y_{\max}$.
-  \item \textbf{Conversión a YOLO.} Los extremos se transforman en coordenadas
-        relativas mediante bordes semiabiertos.
-  \item \textbf{Particionado.} Splits 70/15/15 sin fuga.
-  \item \textbf{Modelado y evaluación.} \emph{Fine-tuning} de un detector
-        preentrenado, evaluación e inferencia en CPU.
+
+    \item \textbf{Adquisición y procedencia.}
+
+    Se recopilan activos públicos de AMARKET conservando identificadores,
+    enlaces, hashes y metadatos necesarios para garantizar trazabilidad.
+
+    \item \textbf{Validación de imágenes.}
+
+    Se comprueba que cada imagen pueda decodificarse correctamente y que cumpla
+    las condiciones establecidas para la línea base.
+
+    \item \textbf{Obtención de la máscara del producto.}
+
+    Se separa el producto del fondo mediante las características de transparencia
+    o uniformidad disponibles en la fotografía.
+
+    \item \textbf{Obtención de píxeles extremos.}
+
+    Sobre la máscara se calculan los extremos:
+
+    \[
+    x_{\min},\quad x_{\max},\quad
+    y_{\min},\quad y_{\max}
+    \]
+
+    \item \textbf{Conversión a formato YOLO.}
+
+    Las coordenadas se transforman a centro, anchura y altura normalizados.
+
+    \item \textbf{Particionado.}
+
+    El dataset se divide de manera determinista en entrenamiento, validación y
+    prueba.
+
+    \item \textbf{Entrenamiento y evaluación.}
+
+    Se realiza \emph{fine-tuning} de un detector YOLO11n y posteriormente se
+    evalúa el modelo congelado sobre el conjunto de prueba.
+
 \end{enumerate}
+
+% ---------------------------------------------------------------------
 
 \subsection{De píxeles extremos a coordenadas YOLO}
 
-Sea una imagen de anchura $W$ y altura $H$, y sean $x_{\min}$, $x_{\max}$,
-$y_{\min}$, $y_{\max}$ los índices de píxel extremos del producto, entendidos de
-forma \textbf{inclusiva}: el píxel de índice $x_{\max}$ pertenece al objeto.
+Sea una imagen de anchura $W$ y altura $H$, y sean
+$x_{\min}$, $x_{\max}$, $y_{\min}$ y $y_{\max}$ los índices extremos del
+producto.
 
-El borde derecho e inferior de la caja se sitúan por tanto en $x_{\max}+1$ e
-$y_{\max}+1$, convención de \emph{bordes semiabiertos} que evita el error de
-truncamiento de un píxel. Las coordenadas normalizadas resultan:
+Los límites máximos se consideran inclusivos. Para representar correctamente la
+extensión del objeto se utiliza una convención de bordes semiabiertos.
+
+Las coordenadas se calculan como:
 
 \begin{align}
-  x_c &= \frac{x_{\min} + x_{\max} + 1}{2W} \label{eq:xc} \\[4pt]
-  y_c &= \frac{y_{\min} + y_{\max} + 1}{2H} \label{eq:yc} \\[4pt]
-  w   &= \frac{x_{\max} - x_{\min} + 1}{W}  \label{eq:w}  \\[4pt]
-  h   &= \frac{y_{\max} - y_{\min} + 1}{H}  \label{eq:h}
+
+x_c &=
+\frac{x_{\min} + x_{\max} + 1}{2W}
+\\[4pt]
+
+y_c &=
+\frac{y_{\min} + y_{\max} + 1}{2H}
+\\[4pt]
+
+w &=
+\frac{x_{\max} - x_{\min} + 1}{W}
+\\[4pt]
+
+h &=
+\frac{y_{\max} - y_{\min} + 1}{H}
+
 \end{align}
 
-Los cuatro valores se escriben con seis decimales y van precedidos siempre de
-\texttt{class\_id = 0}.
+Cada anotación se escribe en formato YOLO precedida por:
 
-\subsection{Particionado sin fuga}
+\begin{center}
+\texttt{class\_id = 0}
+\end{center}
 
-El dataset se divide en 70\,\% entrenamiento, 15\,\% validación y 15\,\% prueba.
-La partición se realiza por grupos, no por imagen suelta: se agrupan las muestras
-que comparten SKU, hash de bytes, grupo de duplicados o linaje de derivación, y
-el grupo completo se asigna a una única partición.
+% ---------------------------------------------------------------------
 
-Sin esta agrupación, dos fotografías del mismo artículo podrían caer en
-particiones distintas y las métricas quedarían infladas por memorización.
+\subsection{Dataset real}
 
-\subsection{Entrenamiento y evaluación}
+El dataset canónico de la línea base contiene:
 
-Se parte de un detector preentrenado YOLOv8n, ajustado sobre la partición de
-entrenamiento y seleccionado sobre la de validación. La semilla queda fijada en
-\texttt{42} y los hiperparámetros se declaran en configuración versionada, nunca
-embebidos en el código.
+\begin{table}[H]
 
-La partición de prueba permanece bloqueada durante todo el ajuste. Se consulta
-una sola vez, al final, y su resultado no realimenta ninguna decisión de diseño.
+\centering
 
-La inferencia se verifica adicionalmente en CPU, sin CUDA, para acreditar que el
-resultado es reproducible en hardware ordinario.
+\caption{Distribución del dataset real de AMARKET.}
 
-% =====================================================================
-\section{Resultados}
+\begin{tabular}{lr}
 
-% TODO-RESULTADOS
-% Esta seccion permanece vacia de cifras hasta cerrar G4 y G5.
-% Ninguna metrica se redacta antes de existir su log correspondiente.
+\toprule
 
-\subsection{Métricas de detección}
+Partición & Imágenes \\
 
-% TODO-RESULTADOS
-% Rellenar con la salida de src/evaluate.py. Cada celda debe ser trazable
-% a un JSON de metricas y a un hash de peso. No estimar, no redondear a
-% ojo, no copiar de la literatura.
+\midrule
 
-\begin{table}[h]
-  \centering
-  \caption{Métricas de detección sobre la partición de prueba.}
-  \label{tab:metricas}
-  \begin{tabular}{lc}
-    \toprule
-    Métrica & Valor \\
-    \midrule
-    mAP@50        & % TODO-RESULTADOS
-                    \\
-    mAP@50-95     & % TODO-RESULTADOS
-                    \\
-    Precisión     & % TODO-RESULTADOS
-                    \\
-    Recall        & % TODO-RESULTADOS
-                    \\
-    \bottomrule
-  \end{tabular}
+Entrenamiento & 459 \\
+
+Validación & 98 \\
+
+Prueba & 98 \\
+
+\midrule
+
+\textbf{Total} & \textbf{655} \\
+
+\bottomrule
+
+\end{tabular}
+
 \end{table}
 
-\subsection{Curvas de entrenamiento}
+La partición utiliza semilla:
 
-% TODO-RESULTADOS
-% Descomentar cuando exista la figura generada por src/train.py.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.8\textwidth]{curvas_train_val.png}
-%   \caption{Evolución de la pérdida en entrenamiento y validación.}
-%   \label{fig:curvas}
-% \end{figure}
+\begin{center}
+\texttt{seed = 42}
+\end{center}
 
-\subsection{Aciertos (10--15)}
+y mantiene separados los activos correspondientes a entrenamiento, validación y
+prueba.
 
-% TODO-RESULTADOS
-% Seleccionar entre 10 y 15 casos correctos reproducibles, con su
-% identificador de imagen trazable al manifest.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.9\textwidth]{aciertos_grid.png}
-%   \caption{Ejemplos de detección correcta.}
-%   \label{fig:aciertos}
-% \end{figure}
+% ---------------------------------------------------------------------
 
-\subsection{Errores (10--15)}
+\subsection{Prevención de fuga de información}
 
-% TODO-RESULTADOS
-% Seleccionar entre 10 y 15 casos incorrectos reproducibles. Los fallos se
-% muestran, no se ocultan.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.9\textwidth]{errores_grid.png}
-%   \caption{Ejemplos de detección incorrecta.}
-%   \label{fig:errores}
-% \end{figure}
+La separación entre conjuntos no se realiza únicamente por nombre de archivo.
+La procedencia de los activos se conserva mediante identificadores, hashes y
+grupos de duplicados.
+
+El objetivo es evitar que versiones del mismo producto o activos equivalentes
+aparezcan simultáneamente en entrenamiento y evaluación.
+
+Las verificaciones realizadas sobre el dataset canónico no detectaron:
+
+\begin{itemize}
+
+    \item clases inválidas;
+    \item cajas inválidas;
+    \item imágenes huérfanas;
+    \item etiquetas huérfanas;
+    \item fugas entre las particiones gobernantes.
+
+\end{itemize}
+
+% =====================================================================
+\section{Entrenamiento}
+% =====================================================================
+
+La línea base gobernante utiliza la arquitectura:
+
+\begin{center}
+\textbf{YOLO11n}
+\end{center}
+
+El entrenamiento se realiza únicamente sobre el conjunto de entrenamiento y las
+decisiones de selección de modelo se realizan utilizando el conjunto de
+validación.
+
+La partición de prueba permanece bloqueada durante el ajuste y se utiliza
+únicamente en la evaluación final del modelo seleccionado.
+
+La evaluación final fue ejecutada adicionalmente en CPU para verificar que la
+inferencia no dependiera de CUDA ni de hardware especializado.
+
+% =====================================================================
+\section{Resultados de la línea base}
+% =====================================================================
+
+\subsection{Evaluación sobre el conjunto de prueba}
+
+El conjunto de prueba está compuesto por:
+
+\begin{center}
+\textbf{98 imágenes reales de AMARKET}
+\end{center}
+
+Los resultados obtenidos por el modelo gobernante fueron:
+
+\begin{table}[H]
+
+\centering
+
+\caption{Métricas finales de la línea base sobre el conjunto de prueba.}
+
+\begin{tabular}{lc}
+
+\toprule
+
+Métrica & Valor \\
+
+\midrule
+
+Precisión & 1.000000 \\
+
+Recall & 1.000000 \\
+
+F1 & 1.000000 \\
+
+mAP@0.5 & 0.995000 \\
+
+mAP@0.5:0.95 & 0.992875 \\
+
+\bottomrule
+
+\end{tabular}
+
+\end{table}
+
+Estos valores corresponden exclusivamente a la evaluación de la línea base real
+y no deben interpretarse como resultados de escenarios multiproducto.
+
+% ---------------------------------------------------------------------
+
+\subsection{Artefacto del modelo}
+
+El modelo gobernante corresponde al artefacto de la línea base de la Fase 1.
+
+La arquitectura utilizada es YOLO11n y la evaluación final fue realizada sobre
+las 98 imágenes reservadas para prueba.
+
+El entrenamiento se considera congelado para esta línea base y no se realizan
+ajustes posteriores utilizando información proveniente del conjunto de prueba.
+
+% =====================================================================
+\section{Extensión multiproducto: Fase 2}
+% =====================================================================
+
+La segunda fase del proyecto preserva íntegramente la línea base de la Fase 1 y
+extiende el problema hacia escenas que contienen varios productos.
+
+Para ello se definió un segundo experimento de entrenamiento que combina los
+productos reales del conjunto de entrenamiento con escenas sintéticas
+multiproducto.
+
+La arquitectura experimental establece:
+
+\begin{itemize}
+
+    \item \textbf{Experimento A:} línea base real de la Fase 1.
+
+    \item \textbf{Experimento B:} entrenamiento real más escenas sintéticas
+    multiproducto.
+
+\end{itemize}
+
+Las imágenes reales de validación y prueba se mantienen inalteradas para
+garantizar que la comparación entre experimentos utilice el mismo dominio de
+evaluación.
+
+La generación sintética se define exclusivamente a partir de activos pertenecientes
+al conjunto de entrenamiento, evitando utilizar productos procedentes de
+validación o prueba.
+
+El diseño gobernante contempla 655 escenas sintéticas y 3287 colocaciones de
+productos distribuidas entre diferentes niveles de dificultad y cantidad de
+objetos por escena.
+
+Las cajas de las escenas sintéticas se calculan a partir de la máscara visible
+final de cada producto después de aplicar composición y oclusión.
+
+Los resultados cuantitativos del Experimento B deben incorporarse únicamente
+cuando su ejecución y evidencia correspondiente se encuentren formalmente
+cerradas.
 
 % =====================================================================
 \section{Discusión}
+% =====================================================================
 
-% TODO-RESULTADOS
-% Interpretar unicamente lo observado. Sin afirmaciones de superioridad,
-% sin comparaciones con estado del arte que no se hayan ejecutado, y sin
-% mezclar metricas de tareas distintas.
+Los resultados de la línea base demuestran que las características visuales de
+las fotografías de catálogo permiten construir automáticamente anotaciones de
+alta consistencia.
+
+El desempeño obtenido debe interpretarse considerando que las imágenes de la
+línea base contienen principalmente productos aislados sobre fondos
+controlados. Por ello, el alto rendimiento del detector no implica
+necesariamente el mismo comportamiento en escenas densas, con oclusiones,
+múltiples productos o fondos complejos.
+
+Precisamente esta limitación motiva la extensión planteada en la Fase 2, donde se
+introducen composiciones multiproducto para analizar la capacidad de
+generalización del detector frente a escenarios progresivamente más complejos.
 
 % =====================================================================
 \section{Limitaciones}
+% =====================================================================
 
-% TODO-RESULTADOS
-% Las limitaciones cuantitativas dependen del tamano final del dataset.
-% Las cualitativas ya son conocidas y se consignan aqui:
+La línea base presenta varias limitaciones:
 
-El método depende de que la fotografía muestre un único producto sobre fondo
-uniforme o transparente. No es aplicable a escenas multiproducto, a fotografías
-de estantería ni a imágenes con fondo complejo, casos que quedan explícitamente
-fuera del alcance.
+\begin{itemize}
 
-El dataset procede de un único comercio, por lo que su diversidad visual está
-acotada por el catálogo de origen y por sus convenciones fotográficas.
+    \item El dataset real procede de un único comercio electrónico.
+
+    \item Las convenciones fotográficas del catálogo reducen la diversidad de
+    fondos y condiciones de iluminación.
+
+    \item Las imágenes reales de la Fase 1 representan principalmente productos
+    aislados.
+
+    \item Las métricas elevadas obtenidas en el conjunto de prueba no deben
+    extrapolarse automáticamente a fotografías de estanterías o escenarios
+    multiproducto.
+
+    \item La extensión sintética permite introducir oclusión y múltiples
+    productos, pero una escena sintética no sustituye completamente la
+    variabilidad de una fotografía real capturada en tienda.
+
+\end{itemize}
+
+Por estas razones, los resultados de cada experimento deben interpretarse dentro
+del dominio específico sobre el cual fue evaluado.
 
 % =====================================================================
 \section{Conclusiones}
+% =====================================================================
 
-% TODO-RESULTADOS
+El proyecto demuestra que es posible automatizar de forma reproducible la
+generación de \emph{bounding boxes} a partir de fotografías de catálogo cuando
+existen condiciones visuales suficientemente controladas.
+
+La línea base fue construida utilizando 655 imágenes reales de AMARKET,
+manteniendo trazabilidad de los activos y una división determinista en
+459 imágenes de entrenamiento, 98 de validación y 98 de prueba.
+
+El modelo YOLO11n seleccionado alcanzó una precisión y un \emph{recall} de
+1,0, un mAP@0.5 de 0,995 y un mAP@0.5:0.95 de 0,992875 sobre el conjunto
+real de prueba.
+
+Además del resultado del modelo, uno de los principales aportes del proyecto es
+la reproducibilidad del proceso: adquisición, validación, generación de cajas,
+particionado, entrenamiento y evaluación se encuentran separados en etapas
+auditables y versionadas.
+
+La segunda fase amplía el alcance hacia escenas multiproducto sintéticas,
+manteniendo intacta la línea base real para permitir comparaciones controladas
+entre ambos escenarios.
 
 % =====================================================================
 \section{Reproducibilidad}
+% =====================================================================
 
 \subsection{Entorno}
 
-% TODO-RESULTADOS
-% El mecanismo de entorno reproducible es una decision abierta: issue
-% ENV-001 del gate G1. El repositorio se creo deliberadamente sin
-% requirements.txt ni environment.yml para no fijarlo por defecto.
-% Completar con la version de Python y el archivo de entorno una vez
-% aprobada la ADR correspondiente.
+La ejecución del proyecto se realiza en un entorno Python versionado. Para las
+validaciones recientes del proyecto se utilizó Python 3.11.9.
 
-\subsection{Comandos}
+La configuración, scripts, manifiestos y evidencia se conservan dentro del
+repositorio, permitiendo reconstruir las distintas etapas del pipeline.
 
-El flujo completo se ejecuta desde la línea de órdenes, sin depender de
-\emph{notebooks}:
+% ---------------------------------------------------------------------
+
+\subsection{Comandos principales}
+
+El pipeline se ejecuta mediante scripts independientes desde línea de comandos.
+
+Ejemplos de las operaciones principales son:
 
 \begin{verbatim}
+
 python src/scraper_extraction.py --smoke-test --limit 3
+
 python src/data/make_boxes.py
+
 python src/data/make_splits.py
-python src/train.py    --config configs/baseline.yaml
+
+python src/train.py --config configs/baseline.yaml
+
 python src/evaluate.py --weights <peso> --split test
-python src/predict.py  --weights <peso> --source <imagen>
+
+python src/predict.py --weights <peso> --source <imagen>
+
 \end{verbatim}
+
+% ---------------------------------------------------------------------
 
 \subsection{Determinismo}
 
-La semilla global es \texttt{42}. Cada ejecución registra la configuración
-resuelta, la versión del entorno y el hash del peso empleado, de modo que una
-evaluación repetida sobre el mismo peso produce métricas idénticas.
+La semilla utilizada para el particionado gobernante es:
+
+\begin{center}
+\texttt{42}
+\end{center}
+
+Cada etapa relevante conserva información suficiente para relacionar los
+resultados con los activos de entrada, las configuraciones y los artefactos de
+modelo correspondientes.
 
 % =====================================================================
+\section{Trabajo futuro}
+% =====================================================================
+
+Como líneas de trabajo futuro se consideran:
+
+\begin{itemize}
+
+    \item evaluar formalmente el Experimento B multiproducto;
+
+    \item analizar el efecto de diferentes niveles de oclusión;
+
+    \item comparar desempeño entre imágenes de catálogo y escenarios
+    multiproducto;
+
+    \item ampliar el dominio hacia imágenes reales de estanterías;
+
+    \item analizar latencia y rendimiento de inferencia bajo diferentes
+    dispositivos;
+
+    \item estudiar robustez frente a fondos complejos y productos parcialmente
+    visibles.
+
+\end{itemize}
+
+% =====================================================================
+% BIBLIOGRAFÍA
+% =====================================================================
+
 \begin{thebibliography}{9}
 
 \bibitem{goldman2019}
-E.~Goldman, R.~Herzig, A.~Eisenschtat, J.~Goldberger y T.~Hassner.
-\newblock \emph{Precise Detection in Densely Packed Scenes}.
-\newblock CVPR, 2019.
-\newblock \url{https://openaccess.thecvf.com/content_CVPR_2019/html/Goldman_Precise_Detection_in_Densely_Packed_Scenes_CVPR_2019_paper.html}
+
+E.~Goldman,
+R.~Herzig,
+A.~Eisenschtat,
+J.~Goldberger
+y T.~Hassner.
+
+\newblock
+\emph{Precise Detection in Densely Packed Scenes}.
+
+\newblock
+CVPR, 2019.
+
+\newblock
+\url{https://openaccess.thecvf.com/content_CVPR_2019/html/Goldman_Precise_Detection_in_Densely_Packed_Scenes_CVPR_2019_paper.html}
+
 
 \bibitem{peng2020}
-J.~Peng, C.~Xiao y Y.~Li.
-\newblock \emph{RP2K: A Large-Scale Retail Product Dataset for Fine-Grained Image Classification}.
-\newblock arXiv:2006.12634, 2020.
-\newblock \url{https://arxiv.org/abs/2006.12634}
+
+J.~Peng,
+C.~Xiao
+y Y.~Li.
+
+\newblock
+\emph{RP2K: A Large-Scale Retail Product Dataset for Fine-Grained Image Classification}.
+
+\newblock
+arXiv:2006.12634, 2020.
+
+\newblock
+\url{https://arxiv.org/abs/2006.12634}
+
 
 \bibitem{mvtecd2s}
-MVTec Software GmbH.
-\newblock \emph{MVTec D2S: Densely Segmented Supermarket Dataset}.
-\newblock \url{https://www.mvtec.com/company/research/datasets/mvtec-d2s}
 
-% TODO-CITAS
-% Pendientes 6 referencias de literatura RPC. No se anaden hasta verificar
-% autoria, venue y anio en la fuente original. Una cita sin comprobar es
-% una afirmacion sin evidencia.
+MVTec Software GmbH.
+
+\newblock
+\emph{MVTec D2S: Densely Segmented Supermarket Dataset}.
+
+\newblock
+\url{https://www.mvtec.com/company/research/datasets/mvtec-d2s}
 
 \end{thebibliography}
+
+% =====================================================================
 
 \end{document}
