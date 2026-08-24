@@ -6,7 +6,7 @@
 %   % TODO-RESULTADOS  -> requiere evidencia de G4/G5
 %   % TODO-CITAS       -> requiere referencia verificada
 % =====================================================================
-\documentclass[11pt,a4paper]{article}
+\documentclass[10pt,a4paper]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -15,6 +15,12 @@
 \usepackage{booktabs}
 \usepackage{amsmath}
 \usepackage[hidelinks]{hyperref}
+\setlength{\parskip}{2pt}
+\setlength{\textwidth}{16.5cm}
+\setlength{\oddsidemargin}{-0.2cm}
+\setlength{\evensidemargin}{-0.2cm}
+\setlength{\textheight}{24.5cm}
+\setlength{\topmargin}{-1.2cm}
 
 \graphicspath{{figuras/}}
 
@@ -36,10 +42,26 @@
 
 % =====================================================================
 \begin{abstract}
-% TODO-RESULTADOS
-% El resumen debe tener entre 150 y 200 palabras e incluir las metricas
-% finales. No se redacta hasta cerrar G5: escribirlo antes obligaria a
-% inventar cifras.
+Este trabajo construye un \emph{pipeline} automático de anotación monoclase
+(\texttt{0: product}) a partir del catálogo público de Amarket: 655 imágenes
+aceptadas, splits 459/98/98 sin fuga de SKU, y un detector YOLO11n
+(Experimento A) evaluado sobre prueba bloqueada. Un replanteo del alcance,
+comunicado por el docente durante el desarrollo, exige además identificar
+\emph{qué} producto aparece en escenas multiproducto tipo caja de
+supermercado. Para responder sin invalidar el contrato monoclase congelado
+(\texttt{class\_id=0} en todo el dataset; SKU y nombre nunca como clase, dado
+que el catálogo tiene aproximadamente una muestra por SKU), se documenta una
+decisión de alcance no congelada (ADR-006) y se implementa una arquitectura
+de dos etapas: el mismo detector monoclase localiza cada objeto, y una
+segunda etapa de \emph{retrieval} visual (SIFT contra un catálogo de 655
+referencias) resuelve la identidad sin reentrenar el detector ni clasificar
+por SKU. El detector, aumentado con 197 escenas sintéticas multiproducto
+(de una meta de 655, limitación declarada), alcanza mAP@50-95=0.9715 sobre
+prueba real bloqueada. La identificación, evaluada de forma cerrada sobre
+481 placements sintéticos, alcanza 84.62\,\% top-1 y 92.31\,\% top-5, con
+0\,\% de tasa \texttt{UNKNOWN}. Se reportan también los errores de identidad,
+concentrados en variantes de una misma línea de producto y envases de baja
+textura.
 \end{abstract}
 
 % =====================================================================
@@ -57,251 +79,293 @@ uniforme o transparente. Esa regularidad permite derivar la caja delimitadora de
 forma determinista a partir de los píxeles extremos del producto, sin
 intervención humana y sin ambigüedad entre anotadores.
 
-El objetivo es un dataset de detección \textbf{monoclase}. La única clase es
-\texttt{0: product}. El SKU, el nombre y la descripción se conservan como
-metadatos de procedencia y trazabilidad, no como clases: el problema abordado es
-\emph{dónde} está el producto, no \emph{cuál} es.
+El objetivo base es un dataset de detección \textbf{monoclase}. La única clase
+YOLO es \texttt{0: product}. El SKU, el nombre y la descripción se conservan
+como metadatos de procedencia y trazabilidad, no como clases YOLO: el detector
+resuelve \emph{dónde} está el producto, no \emph{cuál} es.
+
+Durante el desarrollo, el docente replanteó el objetivo funcional final para
+simular una caja de supermercado: dada una escena con varios productos, el
+sistema debe localizar cada artículo \emph{e} identificar cuál es. Convertir
+\texttt{class\_id} en un identificador de SKU es estadísticamente inviable
+--el catálogo aporta aproximadamente una muestra por SKU, insuficiente para
+construir train/val/test por clase-- y además violaría el contrato monoclase
+congelado del dataset base. La respuesta documentada (Anexo/ADR-006, no
+congelado) es una arquitectura de \textbf{dos etapas}: el detector monoclase
+localiza, y una segunda etapa de \emph{retrieval} visual identifica contra un
+catálogo de referencia, sin reentrenar ni reclasificar el detector.
 
 % =====================================================================
 \section{Marco teórico}
 
 \subsection{Detección de objetos y formato YOLO}
 
-La detección de objetos localiza instancias mediante cajas delimitadoras y les
-asigna una categoría. El formato de anotación YOLO codifica cada caja en
-coordenadas relativas al tamaño de la imagen, con una línea por objeto:
-
-\begin{center}
-\texttt{<class\_id> <x\_center> <y\_center> <width> <height>}
-\end{center}
-
-Los cuatro valores geométricos están normalizados al intervalo $[0,1]$, lo que
-hace la anotación independiente de la resolución. En un dataset monoclase,
-\texttt{class\_id} es siempre \texttt{0}.
+YOLO codifica cada caja como
+\texttt{<class\_id> <x\_c> <y\_c> <w> <h>}, valores normalizados a $[0,1]$
+(independientes de la resolución); en el dataset monoclase, \texttt{class\_id}
+es siempre \texttt{0}. Dada una imagen $W\times H$ y los píxeles extremos
+inclusivos $x_{\min},x_{\max},y_{\min},y_{\max}$ del producto, con borde
+semiabierto ($x_{\max}+1$, $y_{\max}+1$, evitando el truncamiento de un
+píxel):
+\begin{equation}
+x_c=\tfrac{x_{\min}+x_{\max}+1}{2W},\quad
+y_c=\tfrac{y_{\min}+y_{\max}+1}{2H},\quad
+w=\tfrac{x_{\max}-x_{\min}+1}{W},\quad
+h=\tfrac{y_{\max}-y_{\min}+1}{H}
+\label{eq:yolo}
+\end{equation}
+Los cuatro valores se escriben con seis decimales, precedidos de
+\texttt{class\_id=0}.
 
 \subsection{Datasets de retail densamente anotados}
 
-\textbf{SKU-110K}~\cite{goldman2019} es el referente en detección de productos en
-estantería. Contiene 11.762 imágenes con aproximadamente 1,73 millones de cajas
-delimitadoras, y está anotado como un \textbf{único tipo de objeto}: el problema
-que plantea es de localización en escenas densas, no de identificación del
-artículo. Conviene precisar que el «110K» del nombre alude a la diversidad de
-SKU distintos presentes en las escenas, no al número de imágenes ni al de cajas,
-y que esa diversidad no se traduce en clases anotadas.
+\textbf{SKU-110K}~\cite{goldman2019} (11.762 imágenes, $\sim$1,73M de cajas)
+anota estantería densa como un \textbf{único tipo de objeto}: localización en
+escenas densas, no identificación (el «110K» refiere a la diversidad de SKU
+en escena, no a clases anotadas). \textbf{MVTec D2S}~\cite{mvtecd2s} aporta
+segmentación de instancias con separación deliberada train/eval.
+\textbf{RP2K}~\cite{peng2020} aborda reconocimiento \emph{fine-grained} entre
+artículos. La diferencia con este trabajo es de escena y objetivo: los tres
+operan sobre estantería en tienda; aquí se parte de catálogo con un producto
+aislado sobre fondo controlado, lo que habilita la caja determinista, y la
+identificación (cuando se requiere) se resuelve aparte, por
+\emph{retrieval}, no por clases.
 
-\textbf{MVTec D2S}~\cite{mvtecd2s} (\emph{Densely Segmented Supermarket}) aporta
-segmentación de instancias sobre productos de supermercado, con separación
-deliberada entre las condiciones de entrenamiento y las de evaluación.
-
-\textbf{RP2K}~\cite{peng2020} se orienta al reconocimiento \emph{fine-grained} de
-productos de venta minorista, es decir, a distinguir artículos concretos entre sí.
-
-La diferencia con el presente trabajo es de escena y de objetivo. Los tres
-datasets citados operan sobre escenas multiproducto capturadas en tienda; aquí se
-parte de fotografías de catálogo con un único producto aislado sobre fondo
-controlado, lo que habilita la derivación determinista de la caja.
-
-\subsection{Antecedentes en Retail Product Checkout}
-
-% TODO-CITAS
-% Faltan 6 referencias de la literatura RPC, pendientes de verificacion.
-% No se citan hasta comprobar autoria, venue y anio en la fuente original.
-% RPC se menciona unicamente como antecedente cientifico: no es el dataset
-% objetivo de este trabajo, segun el contrato congelado.
+% TODO-CITAS: literatura RPC pendiente de verificar autoria/venue/anio;
+% se omite hasta comprobar la fuente original.
 
 % =====================================================================
 \section{Metodología}
 
 \subsection{Visión general del \emph{pipeline}}
 
-El proceso encadena seis etapas, cada una con propietario y contrato definidos:
+Seis etapas con propietario y contrato definidos: (1) \textbf{adquisición}
+(\texttt{src/scraper\_extraction.py} descarga el catálogo público con
+procedencia trazable); (2) \textbf{validación de fondo} (producto aislado,
+fondo uniforme o transparente; rechazos registrados con motivo);
+(3) \textbf{píxeles extremos} sobre la máscara del producto;
+(4) \textbf{conversión a YOLO}; (5) \textbf{particionado} 70/15/15 sin fuga;
+(6) \textbf{modelado y evaluación} (\emph{fine-tuning}, evaluación e
+inferencia en CPU).
 
-\begin{enumerate}
-  \item \textbf{Adquisición.} \texttt{src/scraper\_extraction.py} recorre el
-        catálogo público de Amarket y descarga fotografías candidatas junto con
-        su procedencia, produciendo un \emph{manifest} determinista.
-  \item \textbf{Validación de fondo.} Se acepta una imagen solo si decodifica,
-        contiene un único producto principal y su fondo es transparente
-        (canal alfa) o uniforme (RGB). Todo rechazo queda registrado con su
-        motivo.
-  \item \textbf{Píxeles extremos.} Sobre la máscara del producto se obtienen los
-        cuatro extremos inclusivos $x_{\min}$, $x_{\max}$, $y_{\min}$,
-        $y_{\max}$.
-  \item \textbf{Conversión a YOLO.} Los extremos se transforman en coordenadas
-        relativas mediante bordes semiabiertos.
-  \item \textbf{Particionado.} Splits 70/15/15 sin fuga.
-  \item \textbf{Modelado y evaluación.} \emph{Fine-tuning} de un detector
-        preentrenado, evaluación e inferencia en CPU.
-\end{enumerate}
+\subsection{Particionado, entrenamiento y evaluación}
 
-\subsection{De píxeles extremos a coordenadas YOLO}
+El dataset se divide 70/15/15 por \emph{grupos} (SKU, hash de bytes, grupo de
+duplicados o linaje), no por imagen suelta, para que ninguna partición filtre
+al resto y las métricas no queden infladas por memorización. Se parte de un
+detector preentrenado (YOLO11n), ajustado sobre entrenamiento y seleccionado
+sobre validación; semilla fija \texttt{42}, hiperparámetros en configuración
+versionada, nunca embebidos en código. Prueba permanece bloqueada durante todo
+el ajuste y se consulta una sola vez, sin realimentar ninguna decisión de
+diseño. La inferencia final se verifica también en CPU, sin CUDA.
 
-Sea una imagen de anchura $W$ y altura $H$, y sean $x_{\min}$, $x_{\max}$,
-$y_{\min}$, $y_{\max}$ los índices de píxel extremos del producto, entendidos de
-forma \textbf{inclusiva}: el píxel de índice $x_{\max}$ pertenece al objeto.
+\subsection{Aumentación sintética y retrieval de identidad}
 
-El borde derecho e inferior de la caja se sitúan por tanto en $x_{\max}+1$ e
-$y_{\max}+1$, convención de \emph{bordes semiabiertos} que evita el error de
-truncamiento de un píxel. Las coordenadas normalizadas resultan:
+Experimento B añade escenas sintéticas multiproducto: composiciones
+deterministas de cutouts \emph{train-only}, con geometría de oclusión
+controlada y verificación de hash. Meta contractual: 655 escenas; la corrida
+completa se detuvo en SYN\_0198 al agotar el presupuesto de búsqueda
+estructurado \emph{respetando} el límite de oclusión, y se congelan las 197
+escenas válidas (limitación declarada), sin tocar validación/prueba (98/98
+reales).
 
-\begin{align}
-  x_c &= \frac{x_{\min} + x_{\max} + 1}{2W} \label{eq:xc} \\[4pt]
-  y_c &= \frac{y_{\min} + y_{\max} + 1}{2H} \label{eq:yc} \\[4pt]
-  w   &= \frac{x_{\max} - x_{\min} + 1}{W}  \label{eq:w}  \\[4pt]
-  h   &= \frac{y_{\max} - y_{\min} + 1}{H}  \label{eq:h}
-\end{align}
-
-Los cuatro valores se escriben con seis decimales y van precedidos siempre de
-\texttt{class\_id = 0}.
-
-\subsection{Particionado sin fuga}
-
-El dataset se divide en 70\,\% entrenamiento, 15\,\% validación y 15\,\% prueba.
-La partición se realiza por grupos, no por imagen suelta: se agrupan las muestras
-que comparten SKU, hash de bytes, grupo de duplicados o linaje de derivación, y
-el grupo completo se asigna a una única partición.
-
-Sin esta agrupación, dos fotografías del mismo artículo podrían caer en
-particiones distintas y las métricas quedarían infladas por memorización.
-
-\subsection{Entrenamiento y evaluación}
-
-Se parte de un detector preentrenado YOLOv8n, ajustado sobre la partición de
-entrenamiento y seleccionado sobre la de validación. La semilla queda fijada en
-\texttt{42} y los hiperparámetros se declaran en configuración versionada, nunca
-embebidos en el código.
-
-La partición de prueba permanece bloqueada durante todo el ajuste. Se consulta
-una sola vez, al final, y su resultado no realimenta ninguna decisión de diseño.
-
-La inferencia se verifica adicionalmente en CPU, sin CUDA, para acreditar que el
-resultado es reproducible en hardware ordinario.
+La segunda etapa recibe el \emph{crop} de cada caja YOLO y lo compara, vía
+descriptores SIFT y \emph{matching} por fuerza bruta con prueba de razón de
+Lowe (0.75), contra un catálogo de 655 referencias (cutout de entrenamiento
+o foto real), indexadas una sola vez. Se devuelve el SKU con más
+coincidencias válidas; por debajo de un umbral mínimo se declara
+\texttt{UNKNOWN}. Determinista, sin entrenamiento ni pesos adicionales:
+SIFT/ORB ya están disponibles en el entorno; se descartó un backend de
+\emph{embeddings} preentrenados por exigir descargar pesos ausentes
+localmente.
 
 % =====================================================================
 \section{Resultados}
 
-% TODO-RESULTADOS
-% Esta seccion permanece vacia de cifras hasta cerrar G4 y G5.
-% Ninguna metrica se redacta antes de existir su log correspondiente.
+\subsection{Detección: Experimento A vs. Experimento B}
 
-\subsection{Métricas de detección}
-
-% TODO-RESULTADOS
-% Rellenar con la salida de src/evaluate.py. Cada celda debe ser trazable
-% a un JSON de metricas y a un hash de peso. No estimar, no redondear a
-% ojo, no copiar de la literatura.
+Experimento A: 459 imágenes reales, un producto por imagen, YOLO11n, 40/40
+épocas, CPU (peso \texttt{sha256:9149dfef...}, evidencia en
+\texttt{docs/evidence/G4\_STATUS.md}). Experimento B: 656
+imágenes (459 reales + 197 sintéticas multiproducto), dos configuraciones GPU
+idénticas salvo \texttt{imgsz} (B0=416, T1=512); T1 se selecciona por mayor
+\texttt{mAP@50-95} en validación (B0: P=0.998, R=0.990, mAP@50=0.995,
+mAP@50-95=0.987, no seleccionado). T2 (\texttt{batch=16}) queda
+deliberadamente diferido: B0 frente a T1 ya constituye el \emph{tuning}
+comparativo requerido, y priorizar la identificación de producto era el
+objetivo funcional replanteado.
 
 \begin{table}[h]
   \centering
-  \caption{Métricas de detección sobre la partición de prueba.}
+  \small
+  \caption{Métricas de detección, una sola evaluación de prueba por
+  experimento.}
   \label{tab:metricas}
-  \begin{tabular}{lc}
+  \begin{tabular}{lcccc}
     \toprule
-    Métrica & Valor \\
+    Métrica & A -- Val & A -- Prueba & B/T1 -- Val & B/T1 -- Prueba \\
     \midrule
-    mAP@50        & % TODO-RESULTADOS
-                    \\
-    mAP@50-95     & % TODO-RESULTADOS
-                    \\
-    Precisión     & % TODO-RESULTADOS
-                    \\
-    Recall        & % TODO-RESULTADOS
-                    \\
+    Precisión  & 0.999 & 1.000000 & 0.999 & 0.985658 \\
+    Recall     & 0.990 & 1.000000 & 1.000 & 1.000000 \\
+    F1         & ---   & 1.000000 & ---   & 0.992777 \\
+    mAP@50     & 0.995 & 0.995000 & 0.995 & 0.994091 \\
+    mAP@50-95  & 0.986 & 0.992875 & \textbf{0.991} & 0.971511 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
+\subsection{Identificación de producto (segunda etapa)}
+
+Evaluación end-to-end sobre las 197 escenas sintéticas / 481 \emph{placements}
+reales, emparejando cada detección con su verdad de composición por IoU
+($\geq 0.5$).
+
+\begin{table}[h]
+  \centering
+  \caption{Identificación de producto sobre 481 placements.}
+  \label{tab:identidad}
+  \begin{tabular}{lc}
+    \toprule
+    Métrica & Valor \\
+    \midrule
+    Detecciones totales (GT=481) & 482 \\
+    Detector recall (IoU$\geq$0.5) & 1.000000 \\
+    Detector precisión (IoU$\geq$0.5) & 0.997925 \\
+    Falsos positivos & 1 \\
+    Identidad top-1 & 407/481 = 84.6154\,\% \\
+    Identidad top-5 & 444/481 = 92.3077\,\% \\
+    Exactitud end-to-end (IoU $\wedge$ SKU top-1) & 407/481 = 84.6154\,\% \\
+    Tasa \texttt{UNKNOWN} & 0.000000 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Advertencia de dominio cerrado:} las escenas sintéticas de evaluación
+derivan de los mismos cutouts que forman el catálogo de referencia. Esta
+cifra mide si el \emph{retrieval} encuentra su propia fuente, no
+generalización a fotografías nuevas de una caja real.
+
 \subsection{Curvas de entrenamiento}
 
-% TODO-RESULTADOS
-% Descomentar cuando exista la figura generada por src/train.py.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.8\textwidth]{curvas_train_val.png}
-%   \caption{Evolución de la pérdida en entrenamiento y validación.}
-%   \label{fig:curvas}
-% \end{figure}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.6\textwidth]{curvas_train_val.png}
+  \caption{Curvas de entrenamiento de T1 (Experimento B, ganador):
+  pérdidas, precisión, recall y mAP por época.}
+  \label{fig:curvas}
+\end{figure}
 
-\subsection{Aciertos (10--15)}
-
-% TODO-RESULTADOS
-% Seleccionar entre 10 y 15 casos correctos reproducibles, con su
-% identificador de imagen trazable al manifest.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.9\textwidth]{aciertos_grid.png}
-%   \caption{Ejemplos de detección correcta.}
-%   \label{fig:aciertos}
-% \end{figure}
-
-\subsection{Errores (10--15)}
-
-% TODO-RESULTADOS
-% Seleccionar entre 10 y 15 casos incorrectos reproducibles. Los fallos se
-% muestran, no se ocultan.
-%
-% \begin{figure}[h]
-%   \centering
-%   \includegraphics[width=0.9\textwidth]{errores_grid.png}
-%   \caption{Ejemplos de detección incorrecta.}
-%   \label{fig:errores}
-% \end{figure}
+Diez aciertos y diez errores de identificación, con caja YOLO, nombre
+predicho/esperado y una hipótesis breve por error, se presentan en el
+Apéndice~\ref{app:ejemplos} para no extender el cuerpo principal.
 
 % =====================================================================
 \section{Discusión}
 
-% TODO-RESULTADOS
-% Interpretar unicamente lo observado. Sin afirmaciones de superioridad,
-% sin comparaciones con estado del arte que no se hayan ejecutado, y sin
-% mezclar metricas de tareas distintas.
+La aumentación sintética multiproducto mejora \texttt{mAP@50-95} en
+validación (0.987$\to$0.991) y el detector T1 mantiene un desempeño casi
+perfecto sobre prueba real bloqueada (0.9715), pese a entrenar con solo 197
+de las 655 escenas planificadas. La tarea de localización monoclase parece
+saturada para este dominio: producto aislado sobre fondo controlado, una
+sola clase, sin ambigüedad de forma.
+
+La identificación es la tarea genuinamente difícil. El 84.6\,\% de exactitud
+top-1 no es una cifra intercambiable con las métricas de detección: mide un
+problema distinto (identidad de instancia por \emph{retrieval}, no
+localización) y, como se advierte arriba, en un dominio cerrado. Los errores
+observados (figura~\ref{fig:errores}) no son aleatorios: se concentran en (a)
+variantes de una misma línea de producto, donde el empaque difiere solo en
+texto o color pequeño (mismo caso que llevó a descartar \texttt{class\_id}
+por SKU en primer lugar), y (b) envases lisos con poca textura local, donde
+SIFT tiene pocos puntos de interés que extraer. Ambos son límites conocidos y
+documentados de los descriptores locales clásicos, no una falla de
+implementación: la verificación cruzada entre el subconjunto de 20 escenas
+usado para elegir el \emph{backend} y la evaluación completa de 481
+\emph{placements} reprodujo exactamente los mismos resultados fila por fila
+cuando se usó el mismo peso, lo que descarta una discrepancia de código.
 
 % =====================================================================
 \section{Limitaciones}
 
-% TODO-RESULTADOS
-% Las limitaciones cuantitativas dependen del tamano final del dataset.
-% Las cualitativas ya son conocidas y se consignan aqui:
+La derivación determinista de cajas por píxeles extremos sigue dependiendo de
+que la fotografía de \emph{catálogo} muestre un único producto sobre fondo
+uniforme o transparente; esa etapa no cambia. La novedad de este trabajo ---la
+composición sintética y la identificación--- sí opera sobre escenas
+multiproducto, pero con límites propios:
 
-El método depende de que la fotografía muestre un único producto sobre fondo
-uniforme o transparente. No es aplicable a escenas multiproducto, a fotografías
-de estantería ni a imágenes con fondo complejo, casos que quedan explícitamente
-fuera del alcance.
-
-El dataset procede de un único comercio, por lo que su diversidad visual está
-acotada por el catálogo de origen y por sus convenciones fotográficas.
+\begin{itemize}
+  \item \textbf{Dataset sintético incompleto (197/655).} La corrida completa
+        falló en SYN\_0198 por agotamiento del presupuesto de búsqueda
+        estructurado, respetando el límite de oclusión en vez de violarlo.
+        Las 197 escenas usadas son todas de dificultad \emph{basic}
+        (2--3 objetos); el detector no fue expuesto durante el entrenamiento
+        a las densidades \emph{medium/hard/extreme} planificadas.
+  \item \textbf{Evaluación de identidad cerrada.} El 84.6\,\% top-1 mide
+        \emph{retrieval} contra el catálogo del que las escenas derivan, no
+        generalización a fotografías nuevas de una caja real.
+  \item \textbf{SIFT confunde variantes de línea y envases lisos}, como se
+        discute arriba; no hay mecanismo de \emph{fine-tuning} sobre esos
+        casos difíciles en este trabajo.
+  \item El dataset procede de un único comercio, por lo que su diversidad
+        visual está acotada por el catálogo de origen y sus convenciones
+        fotográficas.
+\end{itemize}
 
 % =====================================================================
 \section{Conclusiones}
 
-% TODO-RESULTADOS
+El objetivo de localización monoclase se cumple con alta fiabilidad tanto en
+el dominio de producto único (Experimento A, mAP@50-95=0.9929 en prueba) como
+en el multiproducto aumentado sintéticamente (Experimento B/T1,
+mAP@50-95=0.9715 en prueba), sin necesidad de convertir \texttt{class\_id} en
+un identificador de producto --- decisión que además habría sido inviable
+dado el catálogo disponible (aproximadamente una muestra por SKU). La
+arquitectura de dos etapas responde al replanteo docente preservando el
+contrato monoclase congelado: localizar y identificar son problemas
+distintos, resueltos por componentes distintos, con sus propias métricas y
+sus propias limitaciones. La identificación por \emph{retrieval} visual es
+funcional (84.6\,\% top-1, 92.3\,\% top-5) pero no está lista para
+generalizar fuera del catálogo cerrado evaluado; una arquitectura de
+\emph{embeddings} aprendidos, hoy descartada por no haber pesos
+preentrenados disponibles localmente, es la vía natural para mejorarla.
 
 % =====================================================================
 \section{Reproducibilidad}
 
 \subsection{Entorno}
 
-% TODO-RESULTADOS
-% El mecanismo de entorno reproducible es una decision abierta: issue
-% ENV-001 del gate G1. El repositorio se creo deliberadamente sin
-% requirements.txt ni environment.yml para no fijarlo por defecto.
-% Completar con la version de Python y el archivo de entorno una vez
-% aprobada la ADR correspondiente.
+Experimento A: Python 3.11.9, dependencias fijadas en \texttt{requirements.txt},
+CPU. Experimento B (GPU): entorno \texttt{ComputerVision} (WSL2 Ubuntu),
+Python 3.12.13, PyTorch 2.13.0+cu126, Ultralytics 8.4.120, CUDA 12.6, NVIDIA
+GeForce RTX 4050 Laptop (6\,GB). La identificación usa OpenCV 5.0.0
+(\texttt{SIFT\_create}, \texttt{BFMatcher}), ya presente en el entorno GPU sin
+instalación adicional.
 
 \subsection{Comandos}
 
 El flujo completo se ejecuta desde la línea de órdenes, sin depender de
-\emph{notebooks}:
+\emph{notebooks} (el \emph{notebook} de CPU es solo demostración final):
 
-\begin{verbatim}
-python src/scraper_extraction.py --smoke-test --limit 3
-python src/data/make_boxes.py
-python src/data/make_splits.py
-python src/train.py    --config configs/baseline.yaml
-python src/evaluate.py --weights <peso> --split test
-python src/predict.py  --weights <peso> --source <imagen>
-\end{verbatim}
+{\small\begin{verbatim}
+# Experimento A (CPU)
+python src/train.py    --config configs/baseline.yaml --data configs/dataset.yaml \
+                        --output-dir outputs/runs/baseline --seed 42
+python src/evaluate.py --model <peso> --data configs/dataset.yaml --split test \
+                        --allow-test --output-dir outputs/evaluation/baseline
+
+# Experimento B (GPU): sintetico (ADR-005) + entrenamiento/eval/identificacion (ADR-006)
+python -m src.data.assign_synthetic_sources --scene-plan <plan> \
+       --cutout-manifest <manifest> --output <assignments.csv>
+python -m src.data.make_synthetic_scenes --assignments <assignments.csv> \
+       --cutout-root <cutouts> --output-root <synthetic> --manifest <scene_manifest.csv> \
+       --cutout-manifest <manifest> --generator-commit <sha>
+python src/train.py    --config configs/experiment_b_gpu_t1.yaml \
+                        --data <dataset_wsl.yaml> --output-dir <run_t1> --seed 42
+python src/evaluate.py --model <run_t1>/weights/best.pt --data <dataset_wsl.yaml> \
+                        --split test --allow-test --output-dir <test_eval_t1>
+python src/predict.py  --model <run_t1>/weights/best.pt --input <escena.jpg> \
+                        --catalog catalog_identity.csv --output-dir <resultados>
+\end{verbatim}}
 
 \subsection{Determinismo}
 
@@ -335,5 +399,56 @@ MVTec Software GmbH.
 % una afirmacion sin evidencia.
 
 \end{thebibliography}
+
+\appendix
+\section{Ejemplos de identificación (10 aciertos, 10 errores)}
+\label{app:ejemplos}
+
+Seleccionados directamente de \texttt{end\_to\_end\_detail.csv} en orden de
+archivo (sin selección favorable), detector T1 + \emph{retrieval} SIFT. Cada
+imagen muestra la caja YOLO, el nombre predicho y la confianza de detección;
+en los errores se indica también el nombre esperado. Verificación automática:
+la predicción/confianza dibujada en cada imagen coincide exactamente con su
+fila de \texttt{end\_to\_end\_detail.csv} (0 discrepancias sobre 20 filas
+recomputadas con el mismo peso, catálogo y método de \emph{crop} que la
+evaluación gobernante).
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{aciertos_grid.png}
+  \caption{Diez identificaciones correctas.}
+  \label{fig:aciertos}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.85\textwidth]{errores_grid.png}
+  \caption{Diez identificaciones incorrectas: nombre predicho vs. esperado.
+  La caja YOLO es correcta en los diez casos (IoU$\geq$0.94); el error es
+  siempre de identidad, nunca de localización.}
+  \label{fig:errores}
+\end{figure}
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \caption{Hipótesis de causa por error (ver también \S 5, Discusión).}
+  \begin{tabular}{lp{5.6cm}p{5.6cm}}
+    \toprule
+    Escena & Esperado $\to$ Predicho & Hipótesis \\
+    \midrule
+    SYN\_0001\#0 & Serum Izeze Hyper Cica $\to$ Crema Facial Izeze Hyper Cica & Misma línea de producto, envase casi idéntico \\
+    SYN\_0001\#1 & Labial Maybelline tono 505 $\to$ tono 520 & Misma línea, solo cambia el tono (acierta en top-5) \\
+    SYN\_0002\#1 & Aceite de Oliva 250\,Ml $\to$ 500\,Ml & Mismo producto, tamaño de envase distinto \\
+    SYN\_0003\#0 & Desodorante Dove $\to$ Vape Waka & Similitud baja (79); crop con poca textura distintiva \\
+    SYN\_0003\#1 & Helado Delizia $\to$ Regaliz Dori & Similitud baja (76), \emph{matching} ruidoso \\
+    SYN\_0004\#0 & Tónico Izeze $\to$ Crema Facial Izeze & Misma línea de producto \\
+    SYN\_0005\#0 & Desodorante Dove Serum $\to$ Nosotras Rapigel & Similitud baja (57) \\
+    SYN\_0005\#1 & Sombra Resist Coco $\to$ Jarra Stanley & Similitud casi en el umbral \texttt{UNKNOWN} (9); crop pequeño \\
+    SYN\_0006\#0 & Protector Solar con color $\to$ sin color & Mismo producto, variante distinta \\
+    SYN\_0007\#0 & Acondicionador Dove $\to$ Stanley Quencher & Botella lisa, pocos puntos de interés para SIFT \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \end{document}

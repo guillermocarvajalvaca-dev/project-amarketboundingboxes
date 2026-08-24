@@ -1,0 +1,37 @@
+# configs/experiment_b_gpu_b0.yaml
+#
+# Experimento B (P2-G4), corrida B0 (baseline GPU). Copia de baseline.yaml
+# con UNICO cambio autorizado: device (cpu -> 0) para usar la RTX 4050 via
+# WSL/ComputerVision. baseline.yaml NO fue editado.
+#
+# NOTA: train.py (resolver_hiperparametros) no lee ni pasa las claves
+# `deterministic` ni `pretrained` a ultralytics -- se declaran aqui por
+# transparencia documental, pero son inertes para este CLI. Ultralytics ya
+# usa deterministic=True por defecto en su propio trainer, y `pretrained`
+# es implicito al cargar yolo11n.pt (checkpoint COCO).
+
+modelo: yolo11n.pt
+
+epochs: 40
+imgsz: 416
+batch: 8
+device: 0            # RTX 4050 via WSL (ComputerVision env, CUDA 12.6)
+optimizer: auto
+lr0: 0.01
+seed: 42              # default; --seed en CLI puede sobrescribirlo
+
+deterministic: true   # documental -- ver nota arriba, train.py no la lee
+pretrained: true       # documental -- implicito en yolo11n.pt, train.py no la lee
+
+smoke:
+  epochs: 1
+  imgsz: 64
+  batch: 2
+
+augment: false
+mosaic: 0.0
+hsv_h: 0.0
+hsv_s: 0.0
+hsv_v: 0.0
+fliplr: 0.0
+flipud: 0.0

@@ -508,3 +508,208 @@ def test_cutout_relative_path_con_traversal_en_manifiesto_falla(tmp_path):
 
     with pytest.raises(AssignmentError, match="traversal"):
         load_cutout_library(str(path), governing=False)
+
+
+# --------------------------------------------------------------------------
+# Distribución por tolerancia geométrica (foreground_pixels)
+# --------------------------------------------------------------------------
+
+def cutout_rows_with_foreground(count, foreground_pixels):
+    """Filas de manifiesto con la columna opcional foreground_pixels."""
+    rows = cutout_rows(count)
+    for row, fg in zip(rows, foreground_pixels):
+        row["foreground_pixels"] = str(fg)
+    return rows
+
+
+def write_manifest_with_foreground(path, rows):
+    """Escribe un manifiesto conservando TODAS las columnas de las filas
+    (incluida foreground_pixels, ausente en CUTOUT_COLUMNS)."""
+    fieldnames = list(rows[0].keys())
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_determinismo_byte_a_byte_con_foreground_pixels(tmp_path):
+    """Con foreground_pixels presente, mismo input => mismo CSV byte a byte."""
+    rows = cutout_rows_with_foreground(8, [9000, 1000, 8000, 2000, 7000, 3000, 6000, 4000])
+    manifest_path = write_manifest_with_foreground(str(tmp_path / "cutouts.csv"), rows)
+    plan_path = write_scene_plan(
+        str(tmp_path / "plan.csv"),
+        [("medium", 3), ("extreme", 4), ("basic", 2), ("hard", 3)],
+    )
+
+    outputs = []
+    for run in range(2):
+        plan = load_scene_plan(plan_path, governing=False)
+        sources, _ = load_cutout_library(manifest_path, governing=False)
+        assignments = assign_sources(plan, sources, governing=False)
+        out_path = tmp_path / f"assignments_{run}.csv"
+        write_assignments(assignments, str(out_path))
+        outputs.append(out_path.read_bytes())
+
+    assert outputs[0] == outputs[1]
+    assert hashlib.sha256(outputs[0]).hexdigest() == hashlib.sha256(
+        outputs[1]
+    ).hexdigest()
+    # La salida respeta el orden congelado del plan, no el orden de consumo.
+    with open(tmp_path / "assignments_0.csv", newline="", encoding="utf-8") as handle:
+        written = list(csv.DictReader(handle))
+    assert [row["scene_id"] for row in written[:3]] == ["SYN_0001"] * 3
+
+
+def test_cuotas_plan_y_sin_duplicados_con_foreground_pixels(tmp_path):
+    """Con foreground_pixels, las invariantes de siempre se conservan:
+    cuotas por regla lexicográfica, campos del plan intactos fila a fila
+    y cero fuentes repetidas dentro de una escena."""
+    rows = cutout_rows_with_foreground(5, [500, 400, 300, 200, 100])
+    manifest_path = write_manifest_with_foreground(str(tmp_path / "cutouts.csv"), rows)
+    plan_path = write_scene_plan(
+        str(tmp_path / "plan.csv"), [("basic", 2), ("hard", 4)]
+    )
+
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+
+    # Cuotas: divmod(6, 5) => la primera fuente lexicográfica usa 2, el resto 1.
+    ordered = sorted(sources)
+    quotas = compute_usage_quotas(ordered, 6)
+    usage = {}
+    for row in assignments:
+        usage[row["source_asset_id"]] = usage.get(row["source_asset_id"], 0) + 1
+    assert usage == quotas
+    assert quotas[ordered[0]] == 2 and all(q == 1 for q in list(quotas.values())[1:])
+
+    # Plan intacto: cada fila reproduce exactamente su escena del plan.
+    plan_by_id = {scene["scene_id"]: scene for scene in plan}
+    per_scene_sources = {}
+    for row in assignments:
+        scene = plan_by_id[row["scene_id"]]
+        assert row["difficulty"] == scene["difficulty"]
+        assert int(row["scene_seed"]) == scene["scene_seed"]
+        assert int(row["planned_n_products"]) == scene["n_products"]
+        per_scene_sources.setdefault(row["scene_id"], []).append(row["source_asset_id"])
+    for scene in plan:
+        ids = per_scene_sources[scene["scene_id"]]
+        assert len(ids) == scene["n_products"]
+        assert len(set(ids)) == len(ids)  # cero duplicados dentro de escena
+
+
+def test_escenas_estrictas_reciben_menor_carga_geometrica(tmp_path):
+    """La distribución por tolerancia: con foreground_pixels declarado, las
+    escenas estrictas (basic) reciben los cutouts más chicos y las tolerantes
+    (extreme) los más grandes — sin hardcodear scene_ids."""
+    # 12 fuentes con foreground estrictamente creciente por índice; el plan
+    # suma exactamente 12 placements (una pasada, sin cola parcial).
+    rows = cutout_rows_with_foreground(12, [1000 + i * 10 for i in range(12)])
+    manifest_path = write_manifest_with_foreground(str(tmp_path / "cutouts.csv"), rows)
+    plan_path = write_scene_plan(
+        str(tmp_path / "plan.csv"), [("extreme", 4), ("extreme", 5), ("basic", 3)]
+    )
+
+    plan = load_scene_plan(plan_path, governing=False)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assignments = assign_sources(plan, sources, governing=False)
+
+    fg_by_source = {sid: src["foreground_pixels"] for sid, src in sources.items()}
+    load_by_scene = {}
+    for row in assignments:
+        load_by_scene.setdefault(row["scene_id"], []).append(fg_by_source[row["source_asset_id"]])
+
+    plan_by_scene = {scene["scene_id"]: scene for scene in plan}
+    basic = next(
+        sid for sid, scene in plan_by_scene.items() if scene["difficulty"] == "basic"
+    )
+    extremes = sorted(
+        sid for sid, scene in plan_by_scene.items() if scene["difficulty"] == "extreme"
+    )
+
+    # Escena estricta: los 3 foreground más chicos del inventario.
+    smallest = sorted(fg_by_source.values())[:3]
+    assert sorted(load_by_scene[basic]) == smallest
+    # Carga total estrictamente menor que la de cualquier escena tolerante.
+    basic_total = sum(load_by_scene[basic])
+    for sid in extremes:
+        assert basic_total < sum(load_by_scene[sid])
+    # Y entre las tolerantes, la de menos objetos recibe cutouts más grandes
+    # por objeto (promedio de foreground por placement estrictamente mayor).
+    averages = [
+        sum(load_by_scene[sid]) / plan_by_scene[sid]["n_products"]
+        for sid in extremes
+    ]
+    scene_n = [plan_by_scene[sid]["n_products"] for sid in extremes]
+    assert averages == sorted(averages, reverse=True)
+    assert scene_n == sorted(scene_n)
+
+
+# --------------------------------------------------------------------------
+# foreground_pixels: columna ausente vs. columna presente pero incompleta
+# (auditoría AUDIT_89D796C, punto 12: "ausente => 0" no puede enmascarar en
+# silencio un manifiesto que declara la columna pero la deja incompleta).
+# --------------------------------------------------------------------------
+
+def test_foreground_pixels_columna_ausente_default_global_cero(tmp_path):
+    """Sin la columna en el header, toda fuente mide 0 (manifiesto legado)."""
+    manifest_path = write_cutout_manifest(
+        str(tmp_path / "no_column.csv"), cutout_rows(3)
+    )
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assert all(src["foreground_pixels"] == 0 for src in sources.values())
+
+
+def test_foreground_pixels_columna_presente_valores_validos(tmp_path):
+    """Con la columna presente y todo valor válido, se cargan tal cual."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    manifest_path = write_manifest_with_foreground(str(tmp_path / "valid.csv"), rows)
+    sources, _ = load_cutout_library(manifest_path, governing=False)
+    assert sorted(src["foreground_pixels"] for src in sources.values()) == [
+        100,
+        200,
+        300,
+    ]
+
+
+def test_foreground_pixels_celda_vacia_con_columna_presente_falla(tmp_path):
+    """Columna declarada + una celda vacía: manifiesto incompleto, aborta."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = ""
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "empty_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="foreground_pixels' vacío"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_whitespace_con_columna_presente_falla(tmp_path):
+    """Un valor de solo espacios equivale a vacío: no defaultea, aborta."""
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "   "
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "whitespace_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="foreground_pixels' vacío"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_no_numerico_falla(tmp_path):
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "abc"
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "nonnumeric_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="no es un entero"):
+        load_cutout_library(manifest_path, governing=False)
+
+
+def test_foreground_pixels_negativo_falla(tmp_path):
+    rows = cutout_rows_with_foreground(3, [100, 200, 300])
+    rows[1]["foreground_pixels"] = "-5"
+    manifest_path = write_manifest_with_foreground(
+        str(tmp_path / "negative_cell.csv"), rows
+    )
+    with pytest.raises(AssignmentError, match="negativo"):
+        load_cutout_library(manifest_path, governing=False)
