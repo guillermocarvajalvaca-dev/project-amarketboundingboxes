@@ -1,0 +1,35 @@
+# configs/experiment_b_gpu_t1.yaml
+#
+# Experimento B (P2-G4), corrida T1 (tuning: imgsz 416->512, batch=8 igual
+# que B0). Copia de baseline.yaml con dos cambios autorizados: device (cpu ->
+# 0) e imgsz (416 -> 512). Ningun otro hiperparametro cambia respecto de B0.
+# baseline.yaml NO fue editado.
+#
+# NOTA: ver configs/experiment_b_gpu_b0.yaml sobre `deterministic`/`pretrained`
+# (documentales, train.py no las lee).
+
+modelo: yolo11n.pt
+
+epochs: 40
+imgsz: 512
+batch: 8
+device: 0            # RTX 4050 via WSL (ComputerVision env, CUDA 12.6)
+optimizer: auto
+lr0: 0.01
+seed: 42
+
+deterministic: true
+pretrained: true
+
+smoke:
+  epochs: 1
+  imgsz: 64
+  batch: 2
+
+augment: false
+mosaic: 0.0
+hsv_h: 0.0
+hsv_s: 0.0
+hsv_v: 0.0
+fliplr: 0.0
+flipud: 0.0
